@@ -19,7 +19,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         popover = NSPopover()
-        popover.contentSize = NSSize(width: 300, height: 460)
+        popover.contentSize = NSSize(width: 300, height: 10) // auto-sized by SwiftUI
         popover.behavior = .transient
         popover.animates = true
         popover.contentViewController = NSHostingController(

@@ -8,8 +8,7 @@ enum Term {
     static let dim       = Color(hex: 0x888888)
     static let faint     = Color(hex: 0x555555)
     static let green     = Color(hex: 0x4ADE80)
-    static let amber     = Color(hex: 0xFACC15)
-    static let red       = Color(hex: 0xF87171)
+    static let red       = Color(hex: 0xEA4343)
     static let track     = Color(hex: 0x2A2A2A)
 }
 
@@ -25,7 +24,6 @@ extension Color {
 
 struct UsagePopoverView: View {
     @ObservedObject var service: UsageService
-
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             header
@@ -55,7 +53,8 @@ struct UsagePopoverView: View {
             divider
             footer
         }
-        .frame(width: 300, height: 460)
+        .frame(width: 300)
+        .fixedSize(horizontal: false, vertical: true)
         .background(Term.bg)
         .task {
             await service.refresh()
@@ -63,6 +62,8 @@ struct UsagePopoverView: View {
             service.startTick()
         }
     }
+
+    // MARK: - Header
 
     private var header: some View {
         HStack(spacing: 6) {
@@ -91,6 +92,8 @@ struct UsagePopoverView: View {
         .padding(.vertical, 10)
     }
 
+    // MARK: - Account
+
     private func accountCard(_ profile: ProfileResponse) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             row("account", profile.account?.email ?? "-")
@@ -107,24 +110,30 @@ struct UsagePopoverView: View {
                         .foregroundStyle(Term.dim)
                     Text(status)
                         .font(.system(size: 11, weight: .medium, design: .monospaced))
-                        .foregroundStyle(status == "active" ? Term.green : Term.amber)
+                        .foregroundStyle(status == "active" ? Term.green : Term.red)
                 }
             }
         }
         .termCard()
     }
 
+    // MARK: - Usage Card
+
     private func usageCard(_ limits: RateLimitsFile) -> some View {
         VStack(alignment: .leading, spacing: 10) {
             if let fiveHour = limits.five_hour {
                 gauge(label: "Current Session", pct: fiveHour.used_percentage, resetsAt: fiveHour.resets_at, shortReset: true)
             }
+
             if limits.five_hour != nil && limits.seven_day != nil {
                 Rectangle().fill(Term.border).frame(height: 1)
             }
+
             if let sevenDay = limits.seven_day {
                 gauge(label: "Current Week", pct: sevenDay.used_percentage, resetsAt: sevenDay.resets_at, shortReset: false)
+
             }
+
             if let ts = limits.updated_at {
                 let date = Date(timeIntervalSince1970: ts)
                 Text("synced \(date, style: .relative) ago")
@@ -135,11 +144,14 @@ struct UsagePopoverView: View {
         .termCard()
     }
 
+    // MARK: - Gauge
+
     private func gauge(label: String, pct: Double, resetsAt: Double, shortReset: Bool) -> some View {
         let remaining = resetsAt - service.now.timeIntervalSince1970
         let totalWindow: Double = shortReset ? 5 * 3600 : 7 * 24 * 3600
         let elapsed = totalWindow - max(remaining, 0)
         let timePct = min(max(elapsed / totalWindow, 0), 1)
+        let pillThreshold: Double = shortReset ? 600 : 86400 // 10min or 1day
 
         return VStack(alignment: .leading, spacing: 5) {
             HStack(alignment: .firstTextBaseline) {
@@ -149,42 +161,84 @@ struct UsagePopoverView: View {
                 Spacer()
                 Text(String(format: "%.0f%%", pct))
                     .font(.system(size: 20, weight: .bold, design: .monospaced))
-                    .foregroundStyle(gaugeColor(pct))
+                    .foregroundStyle(Term.green)
             }
 
-            GeometryReader { geo in
-                ZStack(alignment: .leading) {
-                    RoundedRectangle(cornerRadius: 2).fill(Term.track)
-                    RoundedRectangle(cornerRadius: 2)
-                        .fill(gaugeColor(pct))
-                        .frame(width: geo.size.width * min(max(pct / 100, 0), 1))
-                }
-            }
-            .frame(height: 4)
+            // Usage bar — segmented, green until 80%, then red
+            usageBar(pct: pct)
 
+            // Reset time + countdown pill
             HStack(spacing: 0) {
-                Text("resets ")
-                    .foregroundStyle(Term.faint)
                 Text(shortReset ? formatResetShort(resetsAt) : formatResetLong(resetsAt))
-                    .foregroundStyle(Term.dim)
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(Term.faint)
                 Spacer()
-                Text(formatCountdown(remaining))
-                    .foregroundStyle(remaining < 600 ? Term.green : Term.dim)
-                    .monospacedDigit()
+                countdownPill(remaining, threshold: pillThreshold)
             }
-            .font(.system(size: 10, design: .monospaced))
 
-            GeometryReader { geo in
-                ZStack(alignment: .leading) {
-                    RoundedRectangle(cornerRadius: 1.5).fill(Term.track)
-                    RoundedRectangle(cornerRadius: 1.5)
-                        .fill(Term.faint)
-                        .frame(width: geo.size.width * timePct)
-                }
-            }
-            .frame(height: 3)
+            // Time bar — simple green + black
+            timeBar(timePct: timePct)
         }
     }
+
+    // Segmented usage bar: green, turns red past 80%. Partial fill on current segment.
+    private func usageBar(pct: Double) -> some View {
+        let segments = 20
+        let progress = Double(segments) * min(max(pct / 100, 0), 1)
+        let fullCount = Int(progress)
+        let partial = progress - Double(fullCount) // 0.0–1.0 within current segment
+        let dangerStart = 16 // 80%
+
+        return HStack(spacing: 1.5) {
+            ForEach(0..<segments, id: \.self) { i in
+                GeometryReader { geo in
+                    let color = i >= dangerStart ? Term.red : Term.green
+                    ZStack(alignment: .leading) {
+                        RoundedRectangle(cornerRadius: 1).fill(Term.track)
+                        if i < fullCount {
+                            RoundedRectangle(cornerRadius: 1).fill(color)
+                        } else if i == fullCount && partial > 0 {
+                            RoundedRectangle(cornerRadius: 1).fill(color)
+                                .frame(width: geo.size.width * partial)
+                        }
+                    }
+                }
+                .frame(height: 4)
+            }
+        }
+    }
+
+    // Simple flat green bar for time
+    private func timeBar(timePct: Double) -> some View {
+        GeometryReader { geo in
+            ZStack(alignment: .leading) {
+                RoundedRectangle(cornerRadius: 2).fill(Term.track)
+                RoundedRectangle(cornerRadius: 2)
+                    .fill(Term.green.opacity(0.35))
+                    .frame(width: geo.size.width * timePct)
+            }
+        }
+        .frame(height: 3)
+    }
+
+    // Countdown pill: green border when close to reset
+    private func countdownPill(_ remaining: Double, threshold: Double) -> some View {
+        let isClose = remaining > 0 && remaining < threshold
+        let color = isClose ? Term.green : Term.dim
+
+        return Text(formatCountdown(remaining))
+            .font(.system(size: 10, design: .monospaced))
+            .monospacedDigit()
+            .foregroundStyle(color)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .overlay(
+                RoundedRectangle(cornerRadius: 4)
+                    .stroke(isClose ? Term.green.opacity(0.5) : Term.border, lineWidth: 1)
+            )
+    }
+
+    // MARK: - Setup Card
 
     private var setupCard: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -202,7 +256,7 @@ struct UsagePopoverView: View {
                         .foregroundStyle(Term.bg)
                         .padding(.horizontal, 10)
                         .padding(.vertical, 4)
-                        .background(Term.dim, in: RoundedRectangle(cornerRadius: 3))
+                        .background(Term.green, in: RoundedRectangle(cornerRadius: 3))
                 }
                 .buttonStyle(.plain)
             } else {
@@ -217,6 +271,8 @@ struct UsagePopoverView: View {
         .termCard()
     }
 
+    // MARK: - Status Line Toggle (square style)
+
     private var statusLineCard: some View {
         HStack {
             VStack(alignment: .leading, spacing: 2) {
@@ -228,17 +284,29 @@ struct UsagePopoverView: View {
                     .foregroundStyle(Term.faint)
             }
             Spacer()
-            Toggle("", isOn: Binding(
-                get: { service.statusLineEnabled },
-                set: { service.setStatusLineEnabled($0) }
-            ))
-            .toggleStyle(.switch)
-            .scaleEffect(0.7)
-            .frame(width: 40)
-            .tint(Term.green)
+            // Square toggle matching terminal aesthetic
+            Button(action: { service.setStatusLineEnabled(!service.statusLineEnabled) }) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 3)
+                        .fill(service.statusLineEnabled ? Term.green.opacity(0.15) : Term.track)
+                        .frame(width: 36, height: 18)
+                    RoundedRectangle(cornerRadius: 3)
+                        .stroke(service.statusLineEnabled ? Term.green.opacity(0.5) : Term.border, lineWidth: 1)
+                        .frame(width: 36, height: 18)
+                    // Knob
+                    RoundedRectangle(cornerRadius: 2)
+                        .fill(service.statusLineEnabled ? Term.green : Term.faint)
+                        .frame(width: 14, height: 12)
+                        .offset(x: service.statusLineEnabled ? 8 : -8)
+                        .animation(.easeInOut(duration: 0.15), value: service.statusLineEnabled)
+                }
+            }
+            .buttonStyle(.plain)
         }
         .termCard()
     }
+
+    // MARK: - Primitives
 
     private func row(_ label: String, _ value: String) -> some View {
         HStack(spacing: 6) {
@@ -255,12 +323,6 @@ struct UsagePopoverView: View {
 
     private var divider: some View {
         Rectangle().fill(Term.border).frame(height: 1)
-    }
-
-    private func gaugeColor(_ pct: Double) -> Color {
-        if pct > 90 { return Term.red }
-        if pct > 70 { return Term.amber }
-        return Term.green
     }
 
     private func formatResetShort(_ epoch: Double) -> String {
@@ -282,7 +344,9 @@ struct UsagePopoverView: View {
     private func formatCountdown(_ seconds: Double) -> String {
         if seconds <= 0 { return "now" }
         let s = Int(seconds)
-        let h = s / 3600, m = (s % 3600) / 60, sec = s % 60
+        let d = s / 86400
+        let h = (s % 86400) / 3600, m = (s % 3600) / 60, sec = s % 60
+        if d > 0 { return String(format: "%dd %dh %02dm", d, h, m) }
         if h > 0 { return String(format: "%dh %02dm %02ds", h, m, sec) }
         if m > 0 { return String(format: "%dm %02ds", m, sec) }
         return String(format: "%ds", sec)
