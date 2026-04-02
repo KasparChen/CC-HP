@@ -22,8 +22,28 @@ extension Color {
     }
 }
 
+/// 0 = fully hidden, 1 = plan/tier only, 2 = all visible
+enum AccountVisibility: Int {
+    case hidden = 0, partial = 1, full = 2
+
+    mutating func cycle() {
+        self = AccountVisibility(rawValue: (rawValue + 1) % 3) ?? .hidden
+    }
+
+    var icon: String {
+        switch self {
+        case .hidden:  return "eye.slash"
+        case .partial: return "eye.trianglebadge.exclamationmark"
+        case .full:    return "eye"
+        }
+    }
+}
+
 struct UsagePopoverView: View {
     @ObservedObject var service: UsageService
+    @ObservedObject var costPanel: CostPanelController
+    @State private var accountVis: AccountVisibility = .full
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             header
@@ -43,6 +63,9 @@ struct UsagePopoverView: View {
                             usageCard(limits)
                         } else {
                             setupCard
+                        }
+                        if service.usage.profile != nil {
+                            costCard
                         }
                         statusLineCard
                     }
@@ -94,16 +117,42 @@ struct UsagePopoverView: View {
 
     // MARK: - Account
 
+    private let mask = "****"
+
     private func accountCard(_ profile: ProfileResponse) -> some View {
         VStack(alignment: .leading, spacing: 6) {
-            row("account", profile.account?.email ?? "-")
-            row("org", profile.organization?.name ?? "-")
-            HStack(spacing: 0) {
-                row("plan", service.usage.planDisplay)
+            // Eye toggle row
+            HStack {
+                if accountVis == .full {
+                    row("account", profile.account?.email ?? "-")
+                } else {
+                    row("account", mask)
+                }
                 Spacer()
-                row("tier", service.usage.tierDisplay)
+                Button(action: { withAnimation(.easeInOut(duration: 0.12)) { accountVis.cycle() } }) {
+                    Image(systemName: accountVis.icon)
+                        .font(.system(size: 9))
+                        .foregroundStyle(Term.faint)
+                }
+                .buttonStyle(.plain)
             }
-            if let status = profile.organization?.subscription_status {
+
+            if accountVis == .full {
+                row("org", profile.organization?.name ?? "-")
+            } else if accountVis == .partial {
+                row("org", mask)
+            }
+            // hidden: skip both account & org rows above
+
+            if accountVis != .hidden {
+                HStack(spacing: 0) {
+                    row("plan", service.usage.planDisplay)
+                    Spacer()
+                    row("tier", service.usage.tierDisplay)
+                }
+            }
+
+            if accountVis != .hidden, let status = profile.organization?.subscription_status {
                 HStack(spacing: 4) {
                     Text("status")
                         .font(.system(size: 10, design: .monospaced))
@@ -238,6 +287,108 @@ struct UsagePopoverView: View {
             )
     }
 
+    // MARK: - Cost Card (click to open side panel)
+
+    private var costCard: some View {
+        Button(action: {
+            // Find the popover's window to position the panel relative to it
+            let popoverWindow = NSApp.windows.first { $0.isVisible && $0.className.contains("Popover") }
+                ?? NSApp.windows.first { $0.isVisible }
+            costPanel.toggle(relativeTo: popoverWindow)
+        }) {
+            VStack(alignment: .leading, spacing: 6) {
+                // Header
+                HStack {
+                    Text("Cost")
+                        .font(.system(size: 11, weight: .medium, design: .monospaced))
+                        .foregroundStyle(Term.text)
+                    Spacer()
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 8))
+                        .foregroundStyle(Term.dim)
+                }
+
+                // Today
+                let today = service.todayCost
+                HStack(spacing: 0) {
+                    Text("Today: ")
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundStyle(Term.dim)
+                    Text("$\(String(format: "%.2f", today.totalCost))")
+                        .font(.system(size: 10, weight: .medium, design: .monospaced))
+                        .foregroundStyle(Term.green)
+                    Text(" · ")
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundStyle(Term.faint)
+                    Text("\(formatTokens(today.totalTokens)) tokens")
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundStyle(Term.green)
+                }
+
+                // API extra inline
+                if today.api_cost > 0 {
+                    HStack(spacing: 0) {
+                        Text("  API: ")
+                            .font(.system(size: 9, design: .monospaced))
+                            .foregroundStyle(Term.faint)
+                        Text("$\(String(format: "%.2f", today.api_cost)) · \(formatTokens(today.api_tokens))")
+                            .font(.system(size: 9, design: .monospaced))
+                            .foregroundStyle(Term.green.opacity(0.6))
+                    }
+                }
+
+                // Last 30 days
+                let last30 = service.last30DaysCost
+                HStack(spacing: 0) {
+                    Text("Last 30 days: ")
+                        .font(.system(size: 9, design: .monospaced))
+                        .foregroundStyle(Term.faint)
+                    Text("$\(String(format: "%.2f", last30.cost))")
+                        .font(.system(size: 9, design: .monospaced))
+                        .foregroundStyle(Term.dim)
+                    Text(" · ")
+                        .font(.system(size: 9, design: .monospaced))
+                        .foregroundStyle(Term.faint)
+                    Text("\(formatTokens(last30.tokens)) tokens")
+                        .font(.system(size: 9, design: .monospaced))
+                        .foregroundStyle(Term.dim)
+                }
+
+                // This month
+                let month = service.monthCost
+                HStack(spacing: 0) {
+                    Text("This month: ")
+                        .font(.system(size: 9, design: .monospaced))
+                        .foregroundStyle(Term.faint)
+                    Text("$\(String(format: "%.2f", month.cost))")
+                        .font(.system(size: 9, design: .monospaced))
+                        .foregroundStyle(Term.dim)
+                    Text(" · ")
+                        .font(.system(size: 9, design: .monospaced))
+                        .foregroundStyle(Term.faint)
+                    Text("\(formatTokens(month.tokens)) tokens")
+                        .font(.system(size: 9, design: .monospaced))
+                        .foregroundStyle(Term.dim)
+                }
+            }
+            .termCard()
+        }
+        .buttonStyle(.plain)
+    }
+
+    // MARK: - Token Formatter
+
+    private func formatTokens(_ count: Int64) -> String {
+        if count >= 1_000_000_000 {
+            return String(format: "%.1fB", Double(count) / 1_000_000_000)
+        } else if count >= 1_000_000 {
+            return String(format: "%.0fM", Double(count) / 1_000_000)
+        } else if count >= 1_000 {
+            return String(format: "%.0fK", Double(count) / 1_000)
+        }
+        return "\(count)"
+    }
+
     // MARK: - Setup Card
 
     private var setupCard: some View {
@@ -328,17 +479,21 @@ struct UsagePopoverView: View {
     private func formatResetShort(_ epoch: Double) -> String {
         let date = Date(timeIntervalSince1970: epoch)
         let f = DateFormatter()
+        f.timeZone = .current
         f.dateFormat = "h a"
         f.amSymbol = "AM"; f.pmSymbol = "PM"
-        return f.string(from: date)
+        let tz = TimeZone.current.abbreviation() ?? ""
+        return "\(f.string(from: date)) \(tz)"
     }
 
     private func formatResetLong(_ epoch: Double) -> String {
         let date = Date(timeIntervalSince1970: epoch)
         let f = DateFormatter()
+        f.timeZone = .current
         f.dateFormat = "MMM d 'at' h a"
         f.amSymbol = "AM"; f.pmSymbol = "PM"
-        return f.string(from: date)
+        let tz = TimeZone.current.abbreviation() ?? ""
+        return "\(f.string(from: date)) \(tz)"
     }
 
     private func formatCountdown(_ seconds: Double) -> String {
