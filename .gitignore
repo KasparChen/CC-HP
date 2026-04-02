@@ -1,0 +1,5 @@
+.build/
+CC-HP.app/
+CC-HP.dmg
+.DS_Store
+*.swp
