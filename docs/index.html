@@ -1,0 +1,350 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CC-HP — Claude Code Hit Points</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&display=swap');
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  :root {
+    --bg: #111111;
+    --card: #1a1a1a;
+    --border: #2a2a2a;
+    --text: #e0e0e0;
+    --dim: #888888;
+    --faint: #555555;
+    --green: #4ade80;
+    --amber: #facc15;
+    --red: #f87171;
+    --track: #222222;
+  }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'JetBrains Mono', monospace;
+    line-height: 1.6;
+    min-height: 100vh;
+  }
+
+  .container {
+    max-width: 640px;
+    margin: 0 auto;
+    padding: 80px 24px;
+  }
+
+  /* Header */
+  .prompt {
+    color: var(--dim);
+    font-size: 14px;
+    margin-bottom: 4px;
+  }
+
+  h1 {
+    font-size: 32px;
+    font-weight: 700;
+    letter-spacing: -0.5px;
+    margin-bottom: 8px;
+  }
+
+  h1 span { color: var(--green); }
+
+  .tagline {
+    color: var(--dim);
+    font-size: 14px;
+    margin-bottom: 48px;
+  }
+
+  .tagline-zh {
+    color: var(--faint);
+    font-size: 12px;
+    margin-top: 4px;
+  }
+
+  /* Mock UI */
+  .mock {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 16px;
+    margin-bottom: 48px;
+    font-size: 12px;
+  }
+
+  .mock-header {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding-bottom: 12px;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 12px;
+  }
+
+  .mock-header .prompt-sym { color: var(--dim); font-weight: 700; }
+  .mock-header .name { font-weight: 600; }
+
+  .mock-card {
+    background: #242424;
+    border: 1px solid #333;
+    border-radius: 4px;
+    padding: 10px;
+    margin-bottom: 8px;
+  }
+
+  .mock-row {
+    display: flex;
+    gap: 6px;
+    margin-bottom: 3px;
+  }
+
+  .mock-row .label { color: var(--dim); min-width: 56px; }
+  .mock-row .value { color: var(--text); font-weight: 500; }
+  .mock-row .value.green { color: var(--green); }
+
+  .gauge-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    margin-bottom: 6px;
+  }
+
+  .gauge-header .label { color: var(--dim); font-size: 11px; }
+  .gauge-header .pct { font-size: 20px; font-weight: 700; color: var(--green); }
+
+  .bar {
+    height: 4px;
+    background: var(--track);
+    border-radius: 2px;
+    margin-bottom: 6px;
+    overflow: hidden;
+  }
+
+  .bar-fill { height: 100%; border-radius: 2px; }
+  .bar-fill.green { background: var(--green); }
+  .bar-fill.amber { background: var(--amber); }
+
+  .reset-row {
+    display: flex;
+    justify-content: space-between;
+    font-size: 10px;
+    margin-bottom: 4px;
+  }
+
+  .reset-row .time-label { color: var(--faint); }
+  .reset-row .time-label span { color: var(--dim); }
+  .reset-row .countdown { color: var(--dim); }
+
+  .time-bar {
+    height: 3px;
+    background: var(--track);
+    border-radius: 1.5px;
+    overflow: hidden;
+  }
+
+  .time-bar-fill { height: 100%; background: var(--faint); border-radius: 1.5px; }
+
+  .separator {
+    height: 1px;
+    background: #333;
+    margin: 10px 0;
+  }
+
+  .synced {
+    font-size: 9px;
+    color: var(--faint);
+    margin-top: 8px;
+  }
+
+  /* Features */
+  .features {
+    margin-bottom: 48px;
+  }
+
+  .feature {
+    margin-bottom: 16px;
+    padding-left: 16px;
+    border-left: 2px solid var(--border);
+  }
+
+  .feature-title {
+    font-size: 13px;
+    font-weight: 600;
+    margin-bottom: 2px;
+  }
+
+  .feature-desc {
+    font-size: 11px;
+    color: var(--dim);
+  }
+
+  /* CTA */
+  .cta {
+    display: flex;
+    gap: 12px;
+    margin-bottom: 48px;
+    flex-wrap: wrap;
+  }
+
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 20px;
+    border-radius: 4px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 13px;
+    font-weight: 500;
+    text-decoration: none;
+    transition: opacity 0.15s;
+  }
+
+  .btn:hover { opacity: 0.85; }
+
+  .btn-primary {
+    background: var(--text);
+    color: var(--bg);
+  }
+
+  .btn-secondary {
+    background: transparent;
+    color: var(--dim);
+    border: 1px solid var(--border);
+  }
+
+  .btn-secondary:hover { color: var(--text); border-color: var(--faint); }
+
+  /* Install */
+  .install {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 16px;
+    margin-bottom: 48px;
+  }
+
+  .install-title {
+    font-size: 11px;
+    color: var(--dim);
+    margin-bottom: 8px;
+  }
+
+  .install code {
+    display: block;
+    font-size: 12px;
+    color: var(--green);
+    margin-bottom: 2px;
+  }
+
+  .install code span { color: var(--dim); }
+
+  /* Footer */
+  footer {
+    font-size: 10px;
+    color: var(--faint);
+    padding-top: 24px;
+    border-top: 1px solid var(--border);
+    display: flex;
+    justify-content: space-between;
+  }
+
+  footer a { color: var(--dim); text-decoration: none; }
+  footer a:hover { color: var(--text); }
+</style>
+</head>
+<body>
+<div class="container">
+  <div class="prompt">$ cc-hp</div>
+  <h1>CC-<span>HP</span></h1>
+  <div class="tagline">
+    Claude Code Hit Points — know your quota before it's gone.
+    <div class="tagline-zh">Claude Code 血条 — 余量一目了然。</div>
+  </div>
+
+  <!-- Mock UI -->
+  <div class="mock">
+    <div class="mock-header">
+      <span class="prompt-sym">&gt;_</span>
+      <span class="name">cc-hp</span>
+    </div>
+
+    <div class="mock-card">
+      <div class="mock-row"><span class="label">account</span><span class="value">you@team.com</span></div>
+      <div class="mock-row"><span class="label">org</span><span class="value">YourOrg</span></div>
+      <div class="mock-row"><span class="label">plan</span><span class="value">Team</span><span style="margin-left:auto"><span class="label">tier</span> <span class="value">Max 5x</span></span></div>
+      <div class="mock-row"><span class="label">status</span><span class="value green">active</span></div>
+    </div>
+
+    <div class="mock-card">
+      <div class="gauge-header">
+        <span class="label">Current Session</span>
+        <span class="pct">32%</span>
+      </div>
+      <div class="bar"><div class="bar-fill green" style="width:32%"></div></div>
+      <div class="reset-row">
+        <span class="time-label">resets <span>4 PM</span></span>
+        <span class="countdown">2h 14m 07s</span>
+      </div>
+      <div class="time-bar"><div class="time-bar-fill" style="width:55%"></div></div>
+
+      <div class="separator"></div>
+
+      <div class="gauge-header">
+        <span class="label">Current Week</span>
+        <span class="pct" style="color:var(--amber)">74%</span>
+      </div>
+      <div class="bar"><div class="bar-fill amber" style="width:74%"></div></div>
+      <div class="reset-row">
+        <span class="time-label">resets <span>Apr 6 at 3 PM</span></span>
+        <span class="countdown">3d 22h 41m</span>
+      </div>
+      <div class="time-bar"><div class="time-bar-fill" style="width:43%"></div></div>
+
+      <div class="synced">synced 12 seconds ago</div>
+    </div>
+  </div>
+
+  <!-- Features -->
+  <div class="features">
+    <div class="feature">
+      <div class="feature-title">Glanceable</div>
+      <div class="feature-desc">Usage % in large monospace type. Live countdown to reset. You know in under 1 second.<br>大字等宽显示用量百分比，实时倒计时，一秒掌握。</div>
+    </div>
+    <div class="feature">
+      <div class="feature-title">Terminal-native</div>
+      <div class="feature-desc">Dark UI, monospace type, muted palette. Feels like it belongs next to your terminal.<br>暗色界面、等宽字体、克制配色，与终端浑然一体。</div>
+    </div>
+    <div class="feature">
+      <div class="feature-title">Zero config</div>
+      <div class="feature-desc">Reads your existing CC credentials from Keychain. One toggle to enable the status line.<br>自动读取 Keychain 中的 CC 凭证，一键开启 status line。</div>
+    </div>
+    <div class="feature">
+      <div class="feature-title">Real-time sync</div>
+      <div class="feature-desc">Watches for file updates from active CC sessions. Data refreshes as you code.<br>监听活跃 CC 会话的文件更新，边写代码边刷新数据。</div>
+    </div>
+  </div>
+
+  <!-- CTA -->
+  <div class="cta">
+    <a href="https://github.com/KasparChen/CC-HP/releases/latest/download/CC-HP.dmg" class="btn btn-primary">Download .dmg</a>
+    <a href="https://github.com/KasparChen/CC-HP" class="btn btn-secondary">GitHub</a>
+  </div>
+
+  <!-- Build from source -->
+  <div class="install">
+    <div class="install-title">or build from source</div>
+    <code><span>$</span> git clone https://github.com/KasparChen/CC-HP.git</code>
+    <code><span>$</span> cd CC-HP && ./build.sh</code>
+    <code><span>$</span> open CC-HP.app</code>
+  </div>
+
+  <footer>
+    <span>MIT License</span>
+    <span>macOS 13+ &middot; Swift &middot; SwiftUI</span>
+    <a href="https://github.com/KasparChen/CC-HP">github.com/KasparChen/CC-HP</a>
+  </footer>
+</div>
+</body>
+</html>
