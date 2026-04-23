@@ -120,8 +120,8 @@ struct ModelPricing {
     static func forModel(_ model: String) -> ModelPricing {
         let m = model.lowercased()
 
-        // Opus 4.5 / 4.6: $5 input, $25 output
-        if m.contains("opus-4-5") || m.contains("opus-4-6") {
+        // Opus 4.5 / 4.6 / 4.7: $5 input, $25 output
+        if m.contains("opus-4-5") || m.contains("opus-4-6") || m.contains("opus-4-7") {
             return ModelPricing(
                 inputPerToken: 5e-6, outputPerToken: 2.5e-5,
                 cacheReadPerToken: 5e-7, cacheCreatePerToken: 6.25e-6,
