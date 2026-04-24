@@ -6,6 +6,9 @@ let settingsPath     = NSHomeDirectory() + "/.claude/settings.json"
 let hookPath         = NSHomeDirectory() + "/.claude/cc-check-hook.sh"
 let costCachePath    = NSHomeDirectory() + "/.claude/cc-hp-cost.json"
 let claudeProjectDir = NSHomeDirectory() + "/.claude/projects"
+let codexAuthPath    = NSHomeDirectory() + "/.codex/auth.json"
+let codexSessionsDir = NSHomeDirectory() + "/.codex/sessions"
+let codexArchiveDir  = NSHomeDirectory() + "/.codex/archived_sessions"
 
 @MainActor
 class UsageService: ObservableObject {
@@ -16,6 +19,9 @@ class UsageService: ObservableObject {
     @Published var now = Date()
     @Published var costHistory = CostHistory.empty
     @Published var extraUsage: OAuthExtraUsage?
+    @Published var codexUsage: CodexUsageSnapshot?
+    @Published var codexAccount: CodexAccount?
+    @Published var codexTokenHistory = CodexTokenHistory.empty
 
     private var fileMonitor: DispatchSourceFileSystemObject?
     private var cachedToken: String?
@@ -44,6 +50,9 @@ class UsageService: ObservableObject {
         checkHookInstalled()
         readStatusLineEnabled()
         usage.lastUpdated = Date()
+
+        loadCodexAccount()
+        await scanCodexUsageFromLogs()
 
         // Scan JSONL logs in background (CPU-bound)
         await scanCostFromLogs()
@@ -252,6 +261,242 @@ class UsageService: ObservableObject {
     func stopFileMonitor() {
         fileMonitor?.cancel()
         fileMonitor = nil
+    }
+
+    // MARK: - Codex Account
+
+    func loadCodexAccount() {
+        codexAccount = Self.readCodexAccount()
+    }
+
+    private nonisolated static func readCodexAccount() -> CodexAccount? {
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: codexAuthPath)),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let tokens = json["tokens"] as? [String: Any] else {
+            return nil
+        }
+
+        let accountId = tokens["account_id"] as? String
+        let idClaims = decodeJWTClaims(tokens["id_token"] as? String)
+        let accessClaims = decodeJWTClaims(tokens["access_token"] as? String)
+        let authClaims = (idClaims?["https://api.openai.com/auth"] as? [String: Any])
+                      ?? (accessClaims?["https://api.openai.com/auth"] as? [String: Any])
+        let profileClaims = accessClaims?["https://api.openai.com/profile"] as? [String: Any]
+
+        let orgs = (authClaims?["organizations"] as? [[String: Any]] ?? []).compactMap { org -> CodexOrganization? in
+            guard let id = org["id"] as? String else { return nil }
+            return CodexOrganization(
+                id: id,
+                title: org["title"] as? String ?? id,
+                role: org["role"] as? String,
+                isDefault: org["is_default"] as? Bool ?? false
+            )
+        }
+
+        return CodexAccount(
+            email: (idClaims?["email"] as? String) ?? (profileClaims?["email"] as? String),
+            planType: authClaims?["chatgpt_plan_type"] as? String,
+            accountId: accountId ?? authClaims?["chatgpt_account_id"] as? String,
+            userId: authClaims?["chatgpt_user_id"] as? String,
+            defaultOrganization: orgs.first { $0.isDefault },
+            organizations: orgs
+        )
+    }
+
+    private nonisolated static func decodeJWTClaims(_ token: String?) -> [String: Any]? {
+        guard let token else { return nil }
+        let parts = token.split(separator: ".")
+        guard parts.count >= 2 else { return nil }
+
+        var payload = String(parts[1])
+            .replacingOccurrences(of: "-", with: "+")
+            .replacingOccurrences(of: "_", with: "/")
+        let padding = (4 - payload.count % 4) % 4
+        payload += String(repeating: "=", count: padding)
+
+        guard let data = Data(base64Encoded: payload),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return nil
+        }
+        return json
+    }
+
+    // MARK: - Codex Usage Scanner
+
+    func scanCodexUsageFromLogs() async {
+        let result = await Task.detached(priority: .userInitiated) {
+            Self.scanCodexLogs()
+        }.value
+        codexUsage = result.latest
+        codexTokenHistory = result.history
+    }
+
+    /// Scans local Codex session JSONL logs for the newest rate-limit event
+    /// and daily token burn based on last_token_usage.
+    private nonisolated static func scanCodexLogs() -> (latest: CodexUsageSnapshot?, history: CodexTokenHistory) {
+        let fm = FileManager.default
+        let roots = [codexSessionsDir, codexArchiveDir].map { URL(fileURLWithPath: $0) }
+        let cutoff = Calendar.current.date(byAdding: .day, value: -30, to: Date()) ?? Date.distantPast
+        let dayFmt = DateFormatter()
+        dayFmt.dateFormat = "yyyy-MM-dd"
+        dayFmt.timeZone = .current
+
+        var files: [(url: URL, modified: Date)] = []
+        for root in roots {
+            guard let enumerator = fm.enumerator(
+                at: root,
+                includingPropertiesForKeys: [.contentModificationDateKey],
+                options: [.skipsHiddenFiles]
+            ) else { continue }
+
+            for case let url as URL in enumerator where url.pathExtension == "jsonl" {
+                let modified = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? .distantPast
+                if modified >= cutoff {
+                    files.append((url, modified))
+                }
+            }
+        }
+
+        files.sort { $0.modified > $1.modified }
+
+        var latest: CodexUsageSnapshot?
+        var daily: [String: Int64] = [:]
+        for file in files {
+            guard let data = try? Data(contentsOf: file.url),
+                  let content = String(data: data, encoding: .utf8) else { continue }
+
+            for lineSubstr in content.split(separator: "\n") {
+                let line = String(lineSubstr)
+                guard line.contains("\"token_count\"") else { continue }
+                guard let snapshot = parseCodexTokenCountLine(String(line), sourceName: file.url.lastPathComponent) else {
+                    continue
+                }
+
+                if latest == nil || snapshot.updatedAt > latest!.updatedAt {
+                    latest = snapshot
+                }
+
+                let day = dayFmt.string(from: snapshot.updatedAt)
+                daily[day, default: 0] += snapshot.lastTokens
+            }
+        }
+
+        let days = daily.map { CodexDailyTokens(date: $0.key, tokens: $0.value) }
+            .sorted { $0.date < $1.date }
+        return (latest, CodexTokenHistory(days: days, updatedAt: Date()))
+    }
+
+    private nonisolated static func parseCodexTokenCountLine(_ line: String, sourceName: String) -> CodexUsageSnapshot? {
+        guard let data = line.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let payload = json["payload"] as? [String: Any],
+              payload["type"] as? String == "token_count" else {
+            return nil
+        }
+
+        let updatedAt = parseISODate(json["timestamp"] as? String) ?? Date()
+        let rateLimits = payload["rate_limits"] as? [String: Any]
+        let primary = parseCodexRateLimit(rateLimits?["primary"])
+        let secondary = parseCodexRateLimit(rateLimits?["secondary"])
+        let planType = rateLimits?["plan_type"] as? String
+
+        let info = payload["info"] as? [String: Any]
+        let totalUsage = info?["total_token_usage"] as? [String: Any]
+        let lastUsage = info?["last_token_usage"] as? [String: Any]
+
+        return CodexUsageSnapshot(
+            primary: primary,
+            secondary: secondary,
+            planType: planType,
+            totalTokens: int64Value(totalUsage?["total_tokens"]) ?? 0,
+            lastTokens: int64Value(lastUsage?["total_tokens"]) ?? 0,
+            modelContextWindow: int64Value(info?["model_context_window"]),
+            updatedAt: updatedAt,
+            sourceName: sourceName
+        )
+    }
+
+    private nonisolated static func parseCodexRateLimit(_ obj: Any?) -> CodexRateLimit? {
+        guard let dict = obj as? [String: Any],
+              let used = doubleValue(dict["used_percent"]),
+              let window = intValue(dict["window_minutes"]),
+              let resetsAt = doubleValue(dict["resets_at"]) else {
+            return nil
+        }
+        return CodexRateLimit(usedPercent: used, windowMinutes: window, resetsAt: resetsAt)
+    }
+
+    private nonisolated static func parseISODate(_ value: String?) -> Date? {
+        guard let value else { return nil }
+        let withFractional = ISO8601DateFormatter()
+        withFractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let plain = ISO8601DateFormatter()
+        plain.formatOptions = [.withInternetDateTime]
+        return withFractional.date(from: value) ?? plain.date(from: value)
+    }
+
+    private nonisolated static func doubleValue(_ value: Any?) -> Double? {
+        if let d = value as? Double { return d }
+        if let i = value as? Int { return Double(i) }
+        if let n = value as? NSNumber { return n.doubleValue }
+        if let s = value as? String { return Double(s) }
+        return nil
+    }
+
+    private nonisolated static func intValue(_ value: Any?) -> Int? {
+        if let i = value as? Int { return i }
+        if let d = value as? Double { return Int(d) }
+        if let n = value as? NSNumber { return n.intValue }
+        if let s = value as? String { return Int(s) }
+        return nil
+    }
+
+    private nonisolated static func int64Value(_ value: Any?) -> Int64? {
+        if let i = value as? Int64 { return i }
+        if let i = value as? Int { return Int64(i) }
+        if let d = value as? Double { return Int64(d) }
+        if let n = value as? NSNumber { return n.int64Value }
+        if let s = value as? String { return Int64(s) }
+        return nil
+    }
+
+    // MARK: - Codex Token Computed Properties
+
+    var codexMonthTokens: Int64 {
+        let cal = Calendar.current
+        let month = cal.component(.month, from: Date())
+        let year = cal.component(.year, from: Date())
+        return codexTokenHistory.days
+            .filter { day in
+                let p = day.date.split(separator: "-")
+                guard p.count >= 2, let y = Int(p[0]), let m = Int(p[1]) else { return false }
+                return y == year && m == month
+            }
+            .reduce(Int64(0)) { $0 + $1.tokens }
+    }
+
+    var codexLast30DaysTokens: Int64 {
+        let fmt = DateFormatter()
+        fmt.dateFormat = "yyyy-MM-dd"
+        fmt.timeZone = .current
+        let cal = Calendar.current
+        guard let cutoff = cal.date(byAdding: .day, value: -30, to: Date()) else { return 0 }
+        let cutoffStr = fmt.string(from: cutoff)
+        return codexTokenHistory.days
+            .filter { $0.date >= cutoffStr }
+            .reduce(Int64(0)) { $0 + $1.tokens }
+    }
+
+    var codexLast14Days: [CodexDailyTokens] {
+        let fmt = DateFormatter()
+        fmt.dateFormat = "yyyy-MM-dd"
+        fmt.timeZone = .current
+        let cal = Calendar.current
+        return (0..<14).reversed().map { i in
+            let date = cal.date(byAdding: .day, value: -i, to: Date())!
+            let ds = fmt.string(from: date)
+            return codexTokenHistory.days.first { $0.date == ds } ?? .zero(date: ds)
+        }
     }
 
     // MARK: - Hook

@@ -39,37 +39,30 @@ enum AccountVisibility: Int {
     }
 }
 
+enum UsageProvider: String, CaseIterable {
+    case claude = "Claude"
+    case codex = "Codex"
+}
+
 struct UsagePopoverView: View {
     @ObservedObject var service: UsageService
     @ObservedObject var costPanel: CostPanelController
+    @ObservedObject var codexTokenPanel: CodexTokenPanelController
     @State private var accountVis: AccountVisibility = .full
+    @State private var provider: UsageProvider = .claude
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             header
             divider
 
-            if service.isLoading && service.usage.profile == nil {
+            if provider == .claude && service.isLoading && service.usage.profile == nil {
                 loadingView
-            } else if let error = service.usage.error, service.usage.profile == nil {
+            } else if provider == .claude, let error = service.usage.error, service.usage.profile == nil {
                 errorView(error)
             } else {
                 ScrollView {
-                    VStack(alignment: .leading, spacing: 8) {
-                        if let profile = service.usage.profile {
-                            accountCard(profile)
-                        }
-                        if let limits = service.usage.rateLimits {
-                            usageCard(limits)
-                        } else {
-                            setupCard
-                        }
-                        if service.usage.profile != nil {
-                            costCard
-                        }
-                        statusLineCard
-                    }
-                    .padding(12)
+                    content
                 }
             }
 
@@ -97,6 +90,7 @@ struct UsagePopoverView: View {
                 .font(.system(size: 13, weight: .semibold, design: .monospaced))
                 .foregroundStyle(Term.text)
             Spacer()
+            providerSwitch
             if service.isLoading {
                 ProgressView()
                     .scaleEffect(0.4)
@@ -113,6 +107,61 @@ struct UsagePopoverView: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
+    }
+
+    private var providerSwitch: some View {
+        HStack(spacing: 1) {
+            ForEach(UsageProvider.allCases, id: \.self) { item in
+                Button(action: { provider = item }) {
+                    Text(item.rawValue)
+                        .font(.system(size: 9, weight: provider == item ? .semibold : .regular, design: .monospaced))
+                        .foregroundStyle(provider == item ? Term.bg : Term.dim)
+                        .frame(width: 42, height: 18)
+                        .background(provider == item ? Term.green : Term.track, in: RoundedRectangle(cornerRadius: 3))
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(1)
+        .background(Term.track, in: RoundedRectangle(cornerRadius: 4))
+        .overlay(RoundedRectangle(cornerRadius: 4).stroke(Term.border, lineWidth: 1))
+    }
+
+    @ViewBuilder
+    private var content: some View {
+        switch provider {
+        case .claude:
+            claudeContent
+        case .codex:
+            codexContent
+        }
+    }
+
+    private var claudeContent: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if let profile = service.usage.profile {
+                accountCard(profile)
+            }
+            if let limits = service.usage.rateLimits {
+                usageCard(limits)
+            } else {
+                setupCard
+            }
+            if service.usage.profile != nil {
+                costCard
+            }
+            statusLineCard
+        }
+        .padding(12)
+    }
+
+    private var codexContent: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            codexAccountCard
+            codexQuotaCard
+            codexCostCard
+        }
+        .padding(12)
     }
 
     // MARK: - Account
@@ -164,6 +213,144 @@ struct UsagePopoverView: View {
             }
         }
         .termCard()
+    }
+
+    // MARK: - Codex
+
+    private var codexAccountCard: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .firstTextBaseline) {
+                if accountVis == .full {
+                    row("account", service.codexAccount?.email ?? "-")
+                } else {
+                    row("account", mask)
+                }
+                Spacer()
+                Button(action: { withAnimation(.easeInOut(duration: 0.12)) { accountVis.cycle() } }) {
+                    Image(systemName: accountVis.icon)
+                        .font(.system(size: 9))
+                        .foregroundStyle(Term.faint)
+                }
+                .buttonStyle(.plain)
+            }
+
+            if accountVis == .full {
+                row("active org", service.codexAccount?.defaultOrganization?.title ?? "-")
+            } else if accountVis == .partial {
+                row("active org", mask)
+            }
+
+            if accountVis != .hidden {
+                HStack(spacing: 0) {
+                    row("plan", codexPlanDisplay)
+                }
+            }
+        }
+        .termCard()
+    }
+
+    private var codexQuotaCard: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            if let codex = service.codexUsage {
+                if let primary = codex.primary {
+                    codexGauge(label: "Session", limit: primary, shortReset: primary.windowMinutes <= 300)
+                }
+
+                if codex.primary != nil && codex.secondary != nil {
+                    Rectangle().fill(Term.border).frame(height: 1)
+                }
+
+                if let secondary = codex.secondary {
+                    codexGauge(label: "Week", limit: secondary, shortReset: false)
+                }
+
+                Text("synced \(codex.updatedAt, style: .relative) ago")
+                    .font(.system(size: 9, design: .monospaced))
+                    .foregroundStyle(Term.faint)
+            } else {
+                Text("waiting for local codex session data")
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(Term.dim)
+            }
+        }
+        .termCard()
+    }
+
+    private var codexCostCard: some View {
+        Button(action: {
+            let popoverWindow = NSApp.windows.first { $0.isVisible && $0.className.contains("Popover") }
+                ?? NSApp.windows.first { $0.isVisible }
+            codexTokenPanel.toggle(relativeTo: popoverWindow)
+        }) {
+            VStack(alignment: .leading, spacing: 6) {
+                HStack {
+                    Text("Token Burn")
+                        .font(.system(size: 11, weight: .medium, design: .monospaced))
+                        .foregroundStyle(Term.text)
+                    Spacer()
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 8))
+                        .foregroundStyle(Term.dim)
+                }
+
+                HStack(spacing: 0) {
+                    Text("Last 30 days: ")
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundStyle(Term.dim)
+                    Text("\(formatTokens(service.codexLast30DaysTokens)) tokens")
+                        .font(.system(size: 10, weight: .medium, design: .monospaced))
+                        .foregroundStyle(Term.green)
+                }
+
+                HStack(spacing: 0) {
+                    Text("This month: ")
+                        .font(.system(size: 9, design: .monospaced))
+                        .foregroundStyle(Term.faint)
+                    Text("\(formatTokens(service.codexMonthTokens)) tokens")
+                        .font(.system(size: 9, design: .monospaced))
+                        .foregroundStyle(Term.dim)
+                }
+            }
+            .termCard()
+        }
+        .buttonStyle(.plain)
+    }
+
+    private var codexPlanDisplay: String {
+        let plan = service.codexUsage?.planType ?? service.codexAccount?.planType ?? "-"
+        return plan.capitalized
+    }
+
+    private func codexGauge(label: String, limit: CodexRateLimit, shortReset: Bool) -> some View {
+        let remaining = limit.resetsAt - service.now.timeIntervalSince1970
+        let totalWindow = Double(limit.windowMinutes) * 60
+        let elapsed = totalWindow - max(remaining, 0)
+        let timePct = min(max(elapsed / max(totalWindow, 1), 0), 1)
+        let pillThreshold: Double = shortReset ? 600 : 86400
+
+        return VStack(alignment: .leading, spacing: 5) {
+            HStack(alignment: .firstTextBaseline) {
+                Text("Codex \(label)")
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(Term.dim)
+                Spacer()
+                Text(String(format: "%.0f%%", limit.usedPercent))
+                    .font(.system(size: 20, weight: .bold, design: .monospaced))
+                    .foregroundStyle(limit.usedPercent >= 80 ? Term.red : Term.green)
+            }
+
+            usageBar(pct: limit.usedPercent)
+
+            HStack(spacing: 0) {
+                Text(shortReset ? formatResetShort(limit.resetsAt) : formatResetLong(limit.resetsAt))
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(Term.faint)
+                Spacer()
+                countdownPill(remaining, threshold: pillThreshold)
+            }
+
+            timeBar(timePct: timePct)
+        }
     }
 
     // MARK: - Usage Card

@@ -44,6 +44,57 @@ struct RateWindow: Codable {
     let resets_at: Double
 }
 
+// MARK: - Codex Usage
+
+struct CodexUsageSnapshot {
+    let primary: CodexRateLimit?
+    let secondary: CodexRateLimit?
+    let planType: String?
+    let totalTokens: Int64
+    let lastTokens: Int64
+    let modelContextWindow: Int64?
+    let updatedAt: Date
+    let sourceName: String?
+}
+
+struct CodexRateLimit {
+    let usedPercent: Double
+    let windowMinutes: Int
+    let resetsAt: Double
+}
+
+struct CodexAccount {
+    let email: String?
+    let planType: String?
+    let accountId: String?
+    let userId: String?
+    let defaultOrganization: CodexOrganization?
+    let organizations: [CodexOrganization]
+}
+
+struct CodexOrganization {
+    let id: String
+    let title: String
+    let role: String?
+    let isDefault: Bool
+}
+
+struct CodexTokenHistory {
+    var days: [CodexDailyTokens]
+    var updatedAt: Date?
+
+    static let empty = CodexTokenHistory(days: [], updatedAt: nil)
+}
+
+struct CodexDailyTokens {
+    let date: String
+    var tokens: Int64
+
+    static func zero(date: String) -> CodexDailyTokens {
+        CodexDailyTokens(date: date, tokens: 0)
+    }
+}
+
 // MARK: - Cost Tracking
 
 struct CostHistory: Codable {

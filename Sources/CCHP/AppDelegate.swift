@@ -6,10 +6,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var popover: NSPopover!
     private var usageService: UsageService!
     private var costPanel: CostPanelController!
+    private var codexTokenPanel: CodexTokenPanelController!
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         usageService = UsageService()
         costPanel = CostPanelController(service: usageService)
+        codexTokenPanel = CodexTokenPanelController(service: usageService)
         NSApp.setActivationPolicy(.accessory)
 
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -25,7 +27,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         popover.behavior = .transient
         popover.animates = true
         popover.contentViewController = NSHostingController(
-            rootView: UsagePopoverView(service: usageService, costPanel: costPanel)
+            rootView: UsagePopoverView(service: usageService, costPanel: costPanel, codexTokenPanel: codexTokenPanel)
         )
         popover.delegate = self
     }
@@ -46,5 +48,6 @@ extension AppDelegate: NSPopoverDelegate {
     func popoverWillClose(_ notification: Notification) {
         // Close the cost chart panel when the main popover closes
         costPanel.close()
+        codexTokenPanel.close()
     }
 }
