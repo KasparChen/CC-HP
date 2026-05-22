@@ -372,10 +372,11 @@ struct UsagePopoverView: View {
 
     private var codexReconnectButton: some View {
         Button(action: { service.reconnectSelectedCodexProfile() }) {
-            Image(systemName: "arrow.triangle.2.circlepath")
-                .font(.system(size: 9, weight: .semibold))
+            Text("reconnect")
+                .font(.system(size: 10, weight: .semibold, design: .monospaced))
                 .foregroundStyle(Term.dim)
-                .frame(width: 20, height: 18)
+                .padding(.horizontal, 8)
+                .frame(height: 20)
                 .background(Term.track, in: RoundedRectangle(cornerRadius: 3))
                 .overlay(RoundedRectangle(cornerRadius: 3).stroke(Term.border, lineWidth: 1))
         }
