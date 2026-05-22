@@ -11,6 +11,7 @@ struct CodexProfile: Identifiable, Equatable {
 struct CodexProfileStore {
     static let activeProfilePathKey = "codexActiveProfilePath"
     static let selectedProfilePathKey = "codexSelectedProfilePath"
+    static let profileOrderKey = "codexProfileOrder"
 
     let defaultHome: URL
     let accountsRoot: URL
@@ -45,7 +46,7 @@ struct CodexProfileStore {
             }.sorted { $0.lastPathComponent.localizedCaseInsensitiveCompare($1.lastPathComponent) == .orderedAscending })
         }
 
-        return homes.map { profile(for: $0) }
+        return orderedProfiles(homes.map { profile(for: $0) })
     }
 
     func renameProfile(homePath: String, displayName: String) {
@@ -106,6 +107,10 @@ struct CodexProfileStore {
         defaults.set(normalizedPath(homePath), forKey: Self.selectedProfilePathKey)
     }
 
+    func saveProfileOrder(_ homePaths: [String]) {
+        defaults.set(homePaths.map(normalizedPath), forKey: Self.profileOrderKey)
+    }
+
     func activateProfile(homePath: String) throws {
         let targetHome = URL(fileURLWithPath: normalizedPath(homePath), isDirectory: true)
         let targetAuth = targetHome.appendingPathComponent("auth.json")
@@ -143,6 +148,23 @@ struct CodexProfileStore {
             isDefaultHome: path == defaultHome.path,
             hasAuth: fileManager.fileExists(atPath: home.appendingPathComponent("auth.json").path)
         )
+    }
+
+    private func orderedProfiles(_ profiles: [CodexProfile]) -> [CodexProfile] {
+        guard let savedOrder = defaults.stringArray(forKey: Self.profileOrderKey), !savedOrder.isEmpty else {
+            return profiles
+        }
+
+        var remaining = Dictionary(uniqueKeysWithValues: profiles.map { ($0.homePath, $0) })
+        var ordered: [CodexProfile] = []
+        for path in savedOrder.map(normalizedPath) {
+            if let profile = remaining.removeValue(forKey: path) {
+                ordered.append(profile)
+            }
+        }
+
+        ordered.append(contentsOf: profiles.filter { remaining[$0.homePath] != nil })
+        return ordered
     }
 
     private func defaultDisplayName(for home: URL) -> String {

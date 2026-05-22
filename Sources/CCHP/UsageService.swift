@@ -306,6 +306,20 @@ class UsageService: ObservableObject {
         loadCodexProfiles()
     }
 
+    func moveCodexProfile(_ movingProfile: CodexProfile, to targetProfile: CodexProfile) {
+        guard movingProfile.id != targetProfile.id,
+              let fromIndex = codexProfiles.firstIndex(of: movingProfile),
+              let toIndex = codexProfiles.firstIndex(of: targetProfile) else {
+            return
+        }
+
+        var reordered = codexProfiles
+        let moved = reordered.remove(at: fromIndex)
+        reordered.insert(moved, at: toIndex)
+        codexProfiles = reordered
+        codexProfileStore.saveProfileOrder(reordered.map(\.homePath))
+    }
+
     func activateSelectedCodexProfile() {
         guard let profile = selectedCodexProfile else { return }
         do {
