@@ -6,9 +6,6 @@ let settingsPath     = NSHomeDirectory() + "/.claude/settings.json"
 let hookPath         = NSHomeDirectory() + "/.claude/cc-check-hook.sh"
 let costCachePath    = NSHomeDirectory() + "/.claude/cc-hp-cost.json"
 let claudeProjectDir = NSHomeDirectory() + "/.claude/projects"
-let codexAuthPath    = NSHomeDirectory() + "/.codex/auth.json"
-let codexSessionsDir = NSHomeDirectory() + "/.codex/sessions"
-let codexArchiveDir  = NSHomeDirectory() + "/.codex/archived_sessions"
 
 @MainActor
 class UsageService: ObservableObject {
@@ -22,14 +19,20 @@ class UsageService: ObservableObject {
     @Published var codexUsage: CodexUsageSnapshot?
     @Published var codexAccount: CodexAccount?
     @Published var codexTokenHistory = CodexTokenHistory.empty
+    @Published var codexProfiles: [CodexProfile] = []
+    @Published var selectedCodexProfileID: String?
+    @Published var activeCodexProfileID: String?
+    @Published var codexProfileError: String?
 
     private var fileMonitor: DispatchSourceFileSystemObject?
     private var cachedToken: String?
     private var tickTimer: Timer?
+    private let codexProfileStore = CodexProfileStore()
 
     init() {
         // Load cached cost data so the UI isn't empty on first open
         loadCachedCostHistory()
+        loadCodexProfiles()
     }
 
     func refresh() async {
@@ -51,6 +54,7 @@ class UsageService: ObservableObject {
         readStatusLineEnabled()
         usage.lastUpdated = Date()
 
+        loadCodexProfiles()
         loadCodexAccount()
         await scanCodexUsageFromLogs()
 
@@ -265,12 +269,103 @@ class UsageService: ObservableObject {
 
     // MARK: - Codex Account
 
-    func loadCodexAccount() {
-        codexAccount = Self.readCodexAccount()
+    func loadCodexProfiles() {
+        let profiles = codexProfileStore.discoverProfiles()
+        codexProfiles = profiles
+        activeCodexProfileID = codexProfileStore.activeProfilePath(profiles: profiles)
+        selectedCodexProfileID = codexProfileStore.selectedProfilePath(profiles: profiles)
     }
 
-    private nonisolated static func readCodexAccount() -> CodexAccount? {
-        guard let data = try? Data(contentsOf: URL(fileURLWithPath: codexAuthPath)),
+    var selectedCodexProfile: CodexProfile? {
+        guard let selectedCodexProfileID else { return nil }
+        return codexProfiles.first { $0.id == selectedCodexProfileID }
+    }
+
+    var activeCodexProfile: CodexProfile? {
+        guard let activeCodexProfileID else { return nil }
+        return codexProfiles.first { $0.id == activeCodexProfileID }
+    }
+
+    private var selectedCodexProfileHomePath: String? {
+        guard let profile = selectedCodexProfile else { return nil }
+        if profile.id == activeCodexProfileID {
+            return codexProfileStore.defaultHome.path
+        }
+        return profile.homePath
+    }
+
+    func selectCodexProfile(_ profile: CodexProfile) {
+        codexProfileStore.setSelectedProfile(homePath: profile.homePath)
+        selectedCodexProfileID = profile.id
+        loadCodexAccount()
+        Task { await scanCodexUsageFromLogs() }
+    }
+
+    func renameCodexProfile(_ profile: CodexProfile, displayName: String) {
+        codexProfileStore.renameProfile(homePath: profile.homePath, displayName: displayName)
+        loadCodexProfiles()
+    }
+
+    func activateSelectedCodexProfile() {
+        guard let profile = selectedCodexProfile else { return }
+        do {
+            try codexProfileStore.activateProfile(homePath: profile.homePath)
+            codexProfileError = nil
+            loadCodexProfiles()
+            loadCodexAccount()
+            Task { await scanCodexUsageFromLogs() }
+        } catch {
+            codexProfileError = error.localizedDescription
+        }
+    }
+
+    func reconnectSelectedCodexProfile() {
+        guard let profile = selectedCodexProfile else { return }
+        openCodexLogin(homePath: profile.homePath)
+    }
+
+    func createCodexProfile() {
+        do {
+            let profile = try codexProfileStore.createProfile()
+            codexProfileError = nil
+            loadCodexProfiles()
+            selectedCodexProfileID = profile.id
+            loadCodexAccount()
+            codexUsage = nil
+            codexTokenHistory = .empty
+            openCodexLogin(homePath: profile.homePath)
+        } catch {
+            codexProfileError = "Cannot create Codex profile: \(error.localizedDescription)"
+        }
+    }
+
+    private func openCodexLogin(homePath: String) {
+        let command = CodexLoginCommand.terminalCommand(homePath: homePath)
+        let script = "tell application \"Terminal\" to do script \(CodexLoginCommand.appleScriptLiteral(command))"
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+        process.arguments = ["-e", script]
+
+        do {
+            try process.run()
+            codexProfileError = nil
+        } catch {
+            codexProfileError = "Cannot open Codex login: \(error.localizedDescription)"
+        }
+    }
+
+    func loadCodexAccount() {
+        guard let homePath = selectedCodexProfileHomePath else {
+            codexAccount = nil
+            return
+        }
+        codexAccount = Self.readCodexAccount(homePath: homePath)
+    }
+
+    private nonisolated static func readCodexAccount(homePath: String) -> CodexAccount? {
+        let authPath = URL(fileURLWithPath: homePath, isDirectory: true).appendingPathComponent("auth.json")
+        guard let data = try? Data(contentsOf: authPath),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let tokens = json["tokens"] as? [String: Any] else {
             return nil
@@ -324,8 +419,13 @@ class UsageService: ObservableObject {
     // MARK: - Codex Usage Scanner
 
     func scanCodexUsageFromLogs() async {
+        guard let homePath = selectedCodexProfileHomePath else {
+            codexUsage = nil
+            codexTokenHistory = .empty
+            return
+        }
         let result = await Task.detached(priority: .userInitiated) {
-            Self.scanCodexLogs()
+            Self.scanCodexLogs(homePath: homePath)
         }.value
         codexUsage = result.latest
         codexTokenHistory = result.history
@@ -333,9 +433,13 @@ class UsageService: ObservableObject {
 
     /// Scans local Codex session JSONL logs for the newest rate-limit event
     /// and daily token burn based on last_token_usage.
-    private nonisolated static func scanCodexLogs() -> (latest: CodexUsageSnapshot?, history: CodexTokenHistory) {
+    private nonisolated static func scanCodexLogs(homePath: String) -> (latest: CodexUsageSnapshot?, history: CodexTokenHistory) {
         let fm = FileManager.default
-        let roots = [codexSessionsDir, codexArchiveDir].map { URL(fileURLWithPath: $0) }
+        let home = URL(fileURLWithPath: homePath, isDirectory: true)
+        let roots = [
+            home.appendingPathComponent("sessions", isDirectory: true),
+            home.appendingPathComponent("archived_sessions", isDirectory: true)
+        ]
         let cutoff = Calendar.current.date(byAdding: .day, value: -30, to: Date()) ?? Date.distantPast
         let dayFmt = DateFormatter()
         dayFmt.dateFormat = "yyyy-MM-dd"

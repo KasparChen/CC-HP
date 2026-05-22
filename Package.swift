@@ -8,6 +8,11 @@ let package = Package(
         .executableTarget(
             name: "CCHP",
             path: "Sources/CCHP"
+        ),
+        .testTarget(
+            name: "CCHPTests",
+            dependencies: ["CCHP"],
+            path: "Tests/CCHPTests"
         )
     ]
 )
