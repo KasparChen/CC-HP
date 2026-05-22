@@ -88,6 +88,26 @@ final class CodexProfileStoreTests: XCTestCase {
         XCTAssertEqual(store.discoverProfiles().map(\.displayName), ["Default", "Profile 1", "Profile 2"])
     }
 
+    func testSavedProfileOrderControlsDiscoveryOrder() throws {
+        let defaultHome = tempRoot.appendingPathComponent(".codex", isDirectory: true)
+        let accountsRoot = tempRoot.appendingPathComponent(".codex-accounts", isDirectory: true)
+        let alphaHome = accountsRoot.appendingPathComponent("alpha", isDirectory: true)
+        let betaHome = accountsRoot.appendingPathComponent("beta", isDirectory: true)
+        try writeAuth("default-auth", to: defaultHome)
+        try writeAuth("alpha-auth", to: alphaHome)
+        try writeAuth("beta-auth", to: betaHome)
+
+        let store = CodexProfileStore(
+            defaultHome: defaultHome,
+            accountsRoot: accountsRoot,
+            defaults: defaults
+        )
+
+        store.saveProfileOrder([betaHome.path, defaultHome.path, alphaHome.path])
+
+        XCTAssertEqual(store.discoverProfiles().map(\.homePath), [betaHome.path, defaultHome.path, alphaHome.path])
+    }
+
     func testActivateProfileCopiesSelectedAuthIntoDefaultHome() throws {
         let defaultHome = tempRoot.appendingPathComponent(".codex", isDirectory: true)
         let accountsRoot = tempRoot.appendingPathComponent(".codex-accounts", isDirectory: true)

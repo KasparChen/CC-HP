@@ -52,6 +52,7 @@ struct UsagePopoverView: View {
     @State private var provider: UsageProvider = .claude
     @State private var renamingCodexProfileID: String?
     @State private var codexProfileNameDraft = ""
+    @State private var draggingCodexProfileID: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -250,6 +251,22 @@ struct UsagePopoverView: View {
                         )
                     }
                     .buttonStyle(.plain)
+                    .opacity(draggingCodexProfileID == profile.id ? 0.45 : 1)
+                    .onDrag {
+                        draggingCodexProfileID = profile.id
+                        return NSItemProvider(object: profile.id as NSString)
+                    }
+                    .onDrop(of: [.text], isTargeted: nil) { _ in
+                        guard let draggingCodexProfileID,
+                              let moving = service.codexProfiles.first(where: { $0.id == draggingCodexProfileID }) else {
+                            return false
+                        }
+                        withAnimation(.easeInOut(duration: 0.14)) {
+                            service.moveCodexProfile(moving, to: profile)
+                        }
+                        self.draggingCodexProfileID = nil
+                        return true
+                    }
                 }
 
                 Button(action: { service.createCodexProfile() }) {
@@ -301,6 +318,13 @@ struct UsagePopoverView: View {
 
                     Spacer()
 
+                    Button(action: { withAnimation(.easeInOut(duration: 0.12)) { accountVis.cycle() } }) {
+                        Image(systemName: accountVis.icon)
+                            .font(.system(size: 9))
+                            .foregroundStyle(Term.faint)
+                    }
+                    .buttonStyle(.plain)
+
                     codexProfileAction(isActive: isActive)
                 }
             }
@@ -312,12 +336,6 @@ struct UsagePopoverView: View {
                     row("account", mask)
                 }
                 Spacer()
-                Button(action: { withAnimation(.easeInOut(duration: 0.12)) { accountVis.cycle() } }) {
-                    Image(systemName: accountVis.icon)
-                        .font(.system(size: 9))
-                        .foregroundStyle(Term.faint)
-                }
-                .buttonStyle(.plain)
             }
 
             if accountVis == .full {
@@ -329,6 +347,10 @@ struct UsagePopoverView: View {
             if accountVis != .hidden {
                 HStack(spacing: 0) {
                     row("plan", codexPlanDisplay)
+                    Spacer()
+                    if profile != nil {
+                        codexReconnectButton
+                    }
                 }
             }
 
@@ -338,24 +360,21 @@ struct UsagePopoverView: View {
                     .foregroundStyle(Term.red)
                     .lineLimit(2)
             }
-
-            if profile != nil {
-                HStack {
-                    Spacer()
-                    Button(action: { service.reconnectSelectedCodexProfile() }) {
-                        Image(systemName: "arrow.triangle.2.circlepath")
-                            .font(.system(size: 9, weight: .semibold))
-                            .foregroundStyle(Term.dim)
-                            .frame(width: 20, height: 18)
-                            .background(Term.track, in: RoundedRectangle(cornerRadius: 3))
-                            .overlay(RoundedRectangle(cornerRadius: 3).stroke(Term.border, lineWidth: 1))
-                    }
-                    .buttonStyle(.plain)
-                    .help("Reconnect this Codex profile")
-                }
-            }
         }
         .termCard()
+    }
+
+    private var codexReconnectButton: some View {
+        Button(action: { service.reconnectSelectedCodexProfile() }) {
+            Image(systemName: "arrow.triangle.2.circlepath")
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundStyle(Term.dim)
+                .frame(width: 20, height: 18)
+                .background(Term.track, in: RoundedRectangle(cornerRadius: 3))
+                .overlay(RoundedRectangle(cornerRadius: 3).stroke(Term.border, lineWidth: 1))
+        }
+        .buttonStyle(.plain)
+        .help("Reconnect this Codex profile")
     }
 
     @ViewBuilder
