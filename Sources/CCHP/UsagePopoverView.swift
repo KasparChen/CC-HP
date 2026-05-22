@@ -52,7 +52,8 @@ struct UsagePopoverView: View {
     @State private var provider: UsageProvider = .claude
     @State private var renamingCodexProfileID: String?
     @State private var codexProfileNameDraft = ""
-    @State private var draggingCodexProfileID: String?
+    @State private var profileToDelete: CodexProfile?
+    @State private var profileToDeleteConfirm: CodexProfile?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -248,42 +249,45 @@ struct UsagePopoverView: View {
         let isSelected = profile.id == service.selectedCodexProfileID
         let isActive = profile.id == service.activeCodexProfileID
 
-        return HStack(spacing: 5) {
-            if isActive {
-                Circle()
-                    .fill(Term.green)
-                    .frame(width: 5, height: 5)
+        return Button(action: { service.selectCodexProfile(profile) }) {
+            HStack(spacing: 5) {
+                if isActive {
+                    Circle()
+                        .fill(Term.green)
+                        .frame(width: 5, height: 5)
+                }
+                Text(profile.displayName)
+                    .font(.system(size: 10, weight: isSelected ? .semibold : .regular, design: .monospaced))
+                    .lineLimit(1)
             }
+            .foregroundStyle(isSelected ? Term.green : Term.text)
+            .padding(.horizontal, 8)
+            .frame(height: 24)
+            .background(isSelected ? Term.green.opacity(0.12) : Term.track, in: RoundedRectangle(cornerRadius: 4))
+            .overlay(
+                RoundedRectangle(cornerRadius: 4)
+                    .stroke(isSelected ? Term.green.opacity(0.75) : Term.border, lineWidth: 1)
+            )
+            .contentShape(RoundedRectangle(cornerRadius: 4))
+        }
+        .buttonStyle(.plain)
+        .draggable(profile.id) {
             Text(profile.displayName)
-                .font(.system(size: 10, weight: isSelected ? .semibold : .regular, design: .monospaced))
-                .lineLimit(1)
+                .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                .foregroundStyle(Term.green)
+                .padding(.horizontal, 8)
+                .frame(height: 24)
+                .background(Term.track, in: RoundedRectangle(cornerRadius: 4))
+                .overlay(RoundedRectangle(cornerRadius: 4).stroke(Term.green.opacity(0.75), lineWidth: 1))
         }
-        .foregroundStyle(isSelected ? Term.green : Term.text)
-        .padding(.horizontal, 8)
-        .frame(height: 24)
-        .background(isSelected ? Term.green.opacity(0.12) : Term.track, in: RoundedRectangle(cornerRadius: 4))
-        .overlay(
-            RoundedRectangle(cornerRadius: 4)
-                .stroke(isSelected ? Term.green.opacity(0.75) : Term.border, lineWidth: 1)
-        )
-        .contentShape(RoundedRectangle(cornerRadius: 4))
-        .opacity(draggingCodexProfileID == profile.id ? 0.45 : 1)
-        .onTapGesture {
-            service.selectCodexProfile(profile)
-        }
-        .onDrag {
-            draggingCodexProfileID = profile.id
-            return NSItemProvider(object: profile.id as NSString)
-        }
-        .onDrop(of: [.text], isTargeted: nil) { _ in
-            guard let draggingCodexProfileID,
-                  let moving = service.codexProfiles.first(where: { $0.id == draggingCodexProfileID }) else {
+        .dropDestination(for: String.self) { items, _ in
+            guard let movingID = items.first,
+                  let moving = service.codexProfiles.first(where: { $0.id == movingID }) else {
                 return false
             }
             withAnimation(.easeInOut(duration: 0.14)) {
                 service.moveCodexProfile(moving, to: profile)
             }
-            self.draggingCodexProfileID = nil
             return true
         }
         .help("Click to view. Drag onto another profile to reorder.")
@@ -351,13 +355,19 @@ struct UsagePopoverView: View {
             }
 
             if accountVis != .hidden {
-                HStack(spacing: 0) {
+                HStack(spacing: 6) {
                     row("plan", codexPlanDisplay)
                     Spacer()
-                    if profile != nil {
-                        codexReconnectButton
+                    if let profile, !profile.isDefaultHome {
+                        codexDeleteButton(profile)
                     }
                 }
+            }
+
+            if !isActive, let snapshot = service.selectedProfileSnapshot {
+                Text("snapshot \(snapshot.capturedAt, style: .relative) ago")
+                    .font(.system(size: 9, design: .monospaced))
+                    .foregroundStyle(Term.faint)
             }
 
             if let error = service.codexProfileError {
@@ -368,20 +378,53 @@ struct UsagePopoverView: View {
             }
         }
         .termCard()
+        .confirmationDialog(
+            "Delete profile?",
+            isPresented: Binding(
+                get: { profileToDelete != nil },
+                set: { if !$0 { profileToDelete = nil } }
+            ),
+            titleVisibility: .visible,
+            presenting: profileToDelete
+        ) { target in
+            Button("Delete \(target.displayName)", role: .destructive) {
+                profileToDelete = nil
+                profileToDeleteConfirm = target
+            }
+            Button("Cancel", role: .cancel) { profileToDelete = nil }
+        } message: { target in
+            Text("Removes \(target.displayName)'s saved snapshot and slot directory. Does not change ~/.codex/ or sign you out of any codex CLI session.")
+        }
+        .confirmationDialog(
+            "This cannot be undone",
+            isPresented: Binding(
+                get: { profileToDeleteConfirm != nil },
+                set: { if !$0 { profileToDeleteConfirm = nil } }
+            ),
+            titleVisibility: .visible,
+            presenting: profileToDeleteConfirm
+        ) { target in
+            Button("Yes, delete \(target.displayName) permanently", role: .destructive) {
+                service.deleteCodexProfile(target)
+                profileToDeleteConfirm = nil
+            }
+            Button("Cancel", role: .cancel) { profileToDeleteConfirm = nil }
+        } message: { target in
+            Text("\(target.displayName) and its quota snapshot will be removed from CC-HP. To re-add it later you'll need to recreate the profile and sign in again.")
+        }
     }
 
-    private var codexReconnectButton: some View {
-        Button(action: { service.reconnectSelectedCodexProfile() }) {
-            Text("reconnect")
-                .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                .foregroundStyle(Term.dim)
-                .padding(.horizontal, 8)
-                .frame(height: 20)
-                .background(Term.track, in: RoundedRectangle(cornerRadius: 3))
-                .overlay(RoundedRectangle(cornerRadius: 3).stroke(Term.border, lineWidth: 1))
+    private func codexDeleteButton(_ profile: CodexProfile) -> some View {
+        Button(action: { profileToDelete = profile }) {
+            Image(systemName: "trash")
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(Term.red.opacity(0.85))
+                .frame(width: 20, height: 20)
+                .background(Color.clear, in: RoundedRectangle(cornerRadius: 3))
+                .overlay(RoundedRectangle(cornerRadius: 3).stroke(Term.red.opacity(0.45), lineWidth: 1))
         }
         .buttonStyle(.plain)
-        .help("Reconnect this Codex profile")
+        .help("Delete this profile and its saved snapshot")
     }
 
     @ViewBuilder
@@ -405,6 +448,7 @@ struct UsagePopoverView: View {
                     .overlay(RoundedRectangle(cornerRadius: 3).stroke(Term.green.opacity(0.75), lineWidth: 1))
             }
             .buttonStyle(.plain)
+            .help("Sign into this profile (opens codex login in Terminal)")
         }
     }
 

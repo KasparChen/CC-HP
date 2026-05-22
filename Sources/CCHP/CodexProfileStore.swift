@@ -5,13 +5,24 @@ struct CodexProfile: Identifiable, Equatable {
     let displayName: String
     let homePath: String
     let isDefaultHome: Bool
-    let hasAuth: Bool
 }
 
+/// CC-HP intentionally does not own codex's auth files. `~/.codex/` is always
+/// the live home and codex CLI is the sole writer of `auth.json`, `sessions/`,
+/// etc. CC-HP only tracks: which profile labels exist, what the user named
+/// them, and a JSON snapshot per profile capturing what that profile saw the
+/// last time it was active. Switching profiles is purely a relabel plus a
+/// `codex login` re-auth flow; no files inside `~/.codex/` are read or moved.
 struct CodexProfileStore {
     static let activeProfilePathKey = "codexActiveProfilePath"
     static let selectedProfilePathKey = "codexSelectedProfilePath"
     static let profileOrderKey = "codexProfileOrder"
+
+    /// Reserved subdirectory name left behind by an earlier version of CC-HP
+    /// that used `~/.codex-accounts/__default__/` as a backup slot. Current
+    /// code no longer reads or writes it, but it must be hidden from the
+    /// profile list so it doesn't surface as a phantom tab.
+    static let legacyReservedDirNames: Set<String> = ["__default__"]
 
     let defaultHome: URL
     let accountsRoot: URL
@@ -31,19 +42,20 @@ struct CodexProfileStore {
     }
 
     func discoverProfiles() -> [CodexProfile] {
-        var homes: [URL] = []
-        if fileManager.fileExists(atPath: defaultHome.path) {
-            homes.append(defaultHome)
-        }
+        var homes: [URL] = [defaultHome]
 
         if let children = try? fileManager.contentsOfDirectory(
             at: accountsRoot,
             includingPropertiesForKeys: [.isDirectoryKey],
             options: [.skipsHiddenFiles]
         ) {
-            homes.append(contentsOf: children.filter { url in
-                ((try? url.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory ?? false)
-            }.sorted { $0.lastPathComponent.localizedCaseInsensitiveCompare($1.lastPathComponent) == .orderedAscending })
+            let extras = children.filter { url in
+                guard ((try? url.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory ?? false) else {
+                    return false
+                }
+                return !Self.legacyReservedDirNames.contains(url.lastPathComponent)
+            }.sorted { $0.lastPathComponent.localizedCaseInsensitiveCompare($1.lastPathComponent) == .orderedAscending }
+            homes.append(contentsOf: extras)
         }
 
         return orderedProfiles(homes.map { profile(for: $0) })
@@ -59,6 +71,9 @@ struct CodexProfileStore {
         }
     }
 
+    /// Allocate an ID for a new profile. The directory is created only as an
+    /// ID slot so the profile survives across CC-HP launches; codex CLI
+    /// itself never sees this path.
     func createProfile() throws -> CodexProfile {
         try fileManager.createDirectory(at: accountsRoot, withIntermediateDirectories: true)
 
@@ -70,28 +85,35 @@ struct CodexProfileStore {
         }
 
         try fileManager.createDirectory(at: home, withIntermediateDirectories: true)
-        let displayName = "Profile \(index)"
-        renameProfile(homePath: home.path, displayName: displayName)
+        renameProfile(homePath: home.path, displayName: "Profile \(index)")
         setSelectedProfile(homePath: home.path)
         return profile(for: home)
     }
 
-    func activeProfilePath(profiles: [CodexProfile]) -> String? {
-        let defaultAuth = try? Data(contentsOf: defaultHome.appendingPathComponent("auth.json"))
-        if let defaultAuth,
-           let match = profiles.first(where: { profile in
-               guard !profile.isDefaultHome else { return false }
-               let auth = try? Data(contentsOf: URL(fileURLWithPath: profile.homePath).appendingPathComponent("auth.json"))
-               return auth == defaultAuth
-           }) {
-            return match.homePath
+    func deleteProfile(homePath: String) {
+        let normalized = normalizedPath(homePath)
+        guard normalized != defaultHome.path else { return }
+        let url = URL(fileURLWithPath: normalized, isDirectory: true)
+        try? fileManager.removeItem(at: url)
+        defaults.removeObject(forKey: nameKey(homePath: normalized))
+        defaults.removeObject(forKey: snapshotKey(homePath: normalized))
+        if defaults.string(forKey: Self.activeProfilePathKey) == normalized {
+            defaults.set(defaultHome.path, forKey: Self.activeProfilePathKey)
         }
+        if defaults.string(forKey: Self.selectedProfilePathKey) == normalized {
+            defaults.set(defaultHome.path, forKey: Self.selectedProfilePathKey)
+        }
+        if var order = defaults.stringArray(forKey: Self.profileOrderKey) {
+            order.removeAll { normalizedPath($0) == normalized }
+            defaults.set(order, forKey: Self.profileOrderKey)
+        }
+    }
 
+    func activeProfilePath(profiles: [CodexProfile]) -> String? {
         if let saved = defaults.string(forKey: Self.activeProfilePathKey),
            profiles.contains(where: { $0.homePath == saved }) {
             return saved
         }
-
         return profiles.first(where: \.isDefaultHome)?.homePath ?? profiles.first?.homePath
     }
 
@@ -107,36 +129,30 @@ struct CodexProfileStore {
         defaults.set(normalizedPath(homePath), forKey: Self.selectedProfilePathKey)
     }
 
+    func setActiveProfile(homePath: String) {
+        let normalized = normalizedPath(homePath)
+        defaults.set(normalized, forKey: Self.activeProfilePathKey)
+        defaults.set(normalized, forKey: Self.selectedProfilePathKey)
+    }
+
     func saveProfileOrder(_ homePaths: [String]) {
         defaults.set(homePaths.map(normalizedPath), forKey: Self.profileOrderKey)
     }
 
-    func activateProfile(homePath: String) throws {
-        let targetHome = URL(fileURLWithPath: normalizedPath(homePath), isDirectory: true)
-        let targetAuth = targetHome.appendingPathComponent("auth.json")
-        guard fileManager.fileExists(atPath: targetAuth.path) else {
-            throw CodexProfileStoreError.missingAuth(targetHome.path)
+    func loadSnapshot(homePath: String) -> CodexProfileSnapshot? {
+        guard let data = defaults.data(forKey: snapshotKey(homePath: normalizedPath(homePath))) else {
+            return nil
         }
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return try? decoder.decode(CodexProfileSnapshot.self, from: data)
+    }
 
-        try fileManager.createDirectory(at: defaultHome, withIntermediateDirectories: true)
-
-        if let currentActivePath = defaults.string(forKey: Self.activeProfilePathKey),
-           currentActivePath != defaultHome.path,
-           currentActivePath != targetHome.path {
-            let currentActiveHome = URL(fileURLWithPath: currentActivePath, isDirectory: true)
-            try? fileManager.createDirectory(at: currentActiveHome, withIntermediateDirectories: true)
-            try? replaceFile(
-                at: currentActiveHome.appendingPathComponent("auth.json"),
-                with: defaultHome.appendingPathComponent("auth.json")
-            )
-        }
-
-        if targetHome.path != defaultHome.path {
-            try replaceFile(at: defaultHome.appendingPathComponent("auth.json"), with: targetAuth)
-        }
-
-        defaults.set(targetHome.path, forKey: Self.activeProfilePathKey)
-        defaults.set(targetHome.path, forKey: Self.selectedProfilePathKey)
+    func saveSnapshot(homePath: String, snapshot: CodexProfileSnapshot) {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        guard let data = try? encoder.encode(snapshot) else { return }
+        defaults.set(data, forKey: snapshotKey(homePath: normalizedPath(homePath)))
     }
 
     private func profile(for home: URL) -> CodexProfile {
@@ -145,8 +161,7 @@ struct CodexProfileStore {
             id: path,
             displayName: defaults.string(forKey: nameKey(homePath: path)) ?? defaultDisplayName(for: home),
             homePath: path,
-            isDefaultHome: path == defaultHome.path,
-            hasAuth: fileManager.fileExists(atPath: home.appendingPathComponent("auth.json").path)
+            isDefaultHome: path == defaultHome.path
         )
     }
 
@@ -181,26 +196,11 @@ struct CodexProfileStore {
         "codexProfileName.\(homePath)"
     }
 
+    private func snapshotKey(homePath: String) -> String {
+        "codexProfileSnapshot.\(homePath)"
+    }
+
     private func normalizedPath(_ path: String) -> String {
         URL(fileURLWithPath: path, isDirectory: true).standardizedFileURL.path
-    }
-
-    private func replaceFile(at destination: URL, with source: URL) throws {
-        if fileManager.fileExists(atPath: destination.path) {
-            try fileManager.removeItem(at: destination)
-        }
-        try fileManager.copyItem(at: source, to: destination)
-        try? fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: destination.path)
-    }
-}
-
-enum CodexProfileStoreError: LocalizedError {
-    case missingAuth(String)
-
-    var errorDescription: String? {
-        switch self {
-        case .missingAuth(let path):
-            return "No Codex auth.json found in \(path)"
-        }
     }
 }

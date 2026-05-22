@@ -86,12 +86,37 @@ struct CodexTokenHistory {
     static let empty = CodexTokenHistory(days: [], updatedAt: nil)
 }
 
-struct CodexDailyTokens {
+struct CodexDailyTokens: Codable {
     let date: String
     var tokens: Int64
 
     static func zero(date: String) -> CodexDailyTokens {
         CodexDailyTokens(date: date, tokens: 0)
+    }
+}
+
+// MARK: - Codex Profile Snapshot
+//
+// Frozen view of what a profile saw the last time it was the live `~/.codex`
+// occupant. CC-HP never touches codex's real files; instead, on profile
+// switch it captures this snapshot for the outgoing profile so non-active
+// tabs still have meaningful content to show.
+struct CodexProfileSnapshot: Codable {
+    let email: String?
+    let planType: String?
+    let accountId: String?
+    let orgTitle: String?
+    let primary: RateSnapshot?
+    let secondary: RateSnapshot?
+    let last30DaysTokens: Int64
+    let monthTokens: Int64
+    let days: [CodexDailyTokens]
+    let capturedAt: Date
+
+    struct RateSnapshot: Codable {
+        let usedPercent: Double
+        let windowMinutes: Int
+        let resetsAt: Double
     }
 }
 

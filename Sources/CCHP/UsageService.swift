@@ -27,6 +27,7 @@ class UsageService: ObservableObject {
     private var fileMonitor: DispatchSourceFileSystemObject?
     private var cachedToken: String?
     private var tickTimer: Timer?
+    private var codexSnapshotTimer: Timer?
     private let codexProfileStore = CodexProfileStore()
 
     init() {
@@ -55,8 +56,10 @@ class UsageService: ObservableObject {
         usage.lastUpdated = Date()
 
         loadCodexProfiles()
-        loadCodexAccount()
-        await scanCodexUsageFromLogs()
+        await captureActiveCodexProfile()
+        if !isSelectedProfileActive {
+            applySelectedProfileSnapshot()
+        }
 
         // Scan JSONL logs in background (CPU-bound)
         await scanCostFromLogs()
@@ -72,6 +75,25 @@ class UsageService: ObservableObject {
     func stopTick() {
         tickTimer?.invalidate()
         tickTimer = nil
+    }
+
+    /// Active codex profile is the only one whose data CC-HP can actually read
+    /// (it lives in `~/.codex/`). Once a minute we re-scan its quota and
+    /// persist a JSON snapshot under that profile's slot so non-active tabs
+    /// can show meaningful data plus a freshness timestamp instead of an empty
+    /// card. The timer keeps running while the popover is closed; that's the
+    /// whole point (otherwise users never accumulate snapshot data).
+    func startCodexSnapshotTimer() {
+        stopCodexSnapshotTimer()
+        codexSnapshotTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
+            Task { @MainActor in await self?.captureActiveCodexProfile() }
+        }
+        Task { @MainActor in await captureActiveCodexProfile() }
+    }
+
+    func stopCodexSnapshotTimer() {
+        codexSnapshotTimer?.invalidate()
+        codexSnapshotTimer = nil
     }
 
     // MARK: - Profile
@@ -286,24 +308,62 @@ class UsageService: ObservableObject {
         return codexProfiles.first { $0.id == activeCodexProfileID }
     }
 
-    private var selectedCodexProfileHomePath: String? {
-        guard let profile = selectedCodexProfile else { return nil }
-        if profile.id == activeCodexProfileID {
-            return codexProfileStore.defaultHome.path
-        }
-        return profile.homePath
+    /// True when the currently selected tab is also the active codex profile,
+    /// so we show live `~/.codex/` data instead of a frozen snapshot.
+    var isSelectedProfileActive: Bool {
+        guard let selectedCodexProfileID, let activeCodexProfileID else { return false }
+        return selectedCodexProfileID == activeCodexProfileID
     }
 
+    /// Tab tap. Just switches the popover view; never touches `~/.codex/`.
     func selectCodexProfile(_ profile: CodexProfile) {
         codexProfileStore.setSelectedProfile(homePath: profile.homePath)
         selectedCodexProfileID = profile.id
-        loadCodexAccount()
-        Task { await scanCodexUsageFromLogs() }
+        codexProfileError = nil
+        refreshSelectedProfileView()
+    }
+
+    /// "Use This" entry point. Captures whatever the currently active profile
+    /// last saw (so its tab still has data after switching), then re-labels
+    /// the active pointer and spawns a headless `codex logout && codex login`
+    /// flow. CC-HP itself never writes inside `~/.codex/`.
+    ///
+    /// Ordering matters: the snapshot must finish persisting under the
+    /// outgoing profile's slot **before** we flip `activeCodexProfileID`,
+    /// otherwise the soon-to-be-emptied live data gets written under the
+    /// wrong slot.
+    func activateSelectedCodexProfile() {
+        guard let target = selectedCodexProfile else { return }
+        Task {
+            await captureActiveCodexProfile()
+            codexProfileStore.setActiveProfile(homePath: target.homePath)
+            activeCodexProfileID = target.homePath
+            selectedCodexProfileID = target.homePath
+            codexProfileError = nil
+            // Clear the live cards; data will repopulate once the user finishes
+            // the OAuth flow and CC-HP re-scans `~/.codex/`.
+            codexAccount = nil
+            codexUsage = nil
+            codexTokenHistory = .empty
+            openCodexLogin()
+        }
     }
 
     func renameCodexProfile(_ profile: CodexProfile, displayName: String) {
         codexProfileStore.renameProfile(homePath: profile.homePath, displayName: displayName)
         loadCodexProfiles()
+    }
+
+    /// Remove a profile's slot directory and stored snapshot. Refuses to
+    /// delete the Default profile because that's the live `~/.codex/` home.
+    func deleteCodexProfile(_ profile: CodexProfile) {
+        guard !profile.isDefaultHome else {
+            codexProfileError = "Default profile cannot be deleted."
+            return
+        }
+        codexProfileStore.deleteProfile(homePath: profile.homePath)
+        loadCodexProfiles()
+        refreshSelectedProfileView()
     }
 
     func moveCodexProfile(_ movingProfile: CodexProfile, to targetProfile: CodexProfile) {
@@ -320,61 +380,214 @@ class UsageService: ObservableObject {
         codexProfileStore.saveProfileOrder(reordered.map(\.homePath))
     }
 
-    func activateSelectedCodexProfile() {
-        guard let profile = selectedCodexProfile else { return }
-        do {
-            try codexProfileStore.activateProfile(homePath: profile.homePath)
-            codexProfileError = nil
-            loadCodexProfiles()
-            loadCodexAccount()
-            Task { await scanCodexUsageFromLogs() }
-        } catch {
-            codexProfileError = error.localizedDescription
-        }
-    }
-
-    func reconnectSelectedCodexProfile() {
-        guard let profile = selectedCodexProfile else { return }
-        openCodexLogin(homePath: profile.homePath)
-    }
-
     func createCodexProfile() {
         do {
             let profile = try codexProfileStore.createProfile()
             codexProfileError = nil
-            loadCodexProfiles()
-            selectedCodexProfileID = profile.id
-            loadCodexAccount()
-            codexUsage = nil
-            codexTokenHistory = .empty
-            openCodexLogin(homePath: profile.homePath)
+            // Capture the outgoing active profile first so its tab keeps
+            // meaningful data, then flip the active pointer onto the freshly
+            // created slot and kick OAuth so the user signs in.
+            Task {
+                await captureActiveCodexProfile()
+                codexProfileStore.setActiveProfile(homePath: profile.homePath)
+                codexProfiles = codexProfileStore.discoverProfiles()
+                activeCodexProfileID = profile.homePath
+                selectedCodexProfileID = profile.homePath
+                codexAccount = nil
+                codexUsage = nil
+                codexTokenHistory = .empty
+                openCodexLogin()
+            }
         } catch {
             codexProfileError = "Cannot create Codex profile: \(error.localizedDescription)"
         }
     }
 
-    private func openCodexLogin(homePath: String) {
-        let command = CodexLoginCommand.terminalCommand(homePath: homePath)
-        let script = "tell application \"Terminal\" to do script \(CodexLoginCommand.appleScriptLiteral(command))"
+    /// Spawn `codex logout && codex login` as a headless subprocess against
+    /// the user's default CODEX_HOME (`~/.codex`). No Terminal window pops
+    /// up; the OAuth flow still opens the user's browser for consent, which
+    /// is unavoidable. Stderr is captured so a failed login surfaces in the
+    /// popover instead of being silently dropped.
+    private func openCodexLogin() {
+        var env = ProcessInfo.processInfo.environment
+        // GUI apps inherit a sparse PATH; prepend the common Homebrew / system
+        // locations so `codex` resolves regardless of the user's shell config.
+        let extraPaths = ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"]
+        let existingPath = env["PATH"] ?? ""
+        env["PATH"] = (extraPaths + [existingPath]).joined(separator: ":")
+        env["CODEX_HOME"] = codexProfileStore.defaultHome.path
 
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-        process.arguments = ["-e", script]
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        process.arguments = ["sh", "-c", CodexLoginCommand.shellSnippet]
+        process.environment = env
+
+        let errPipe = Pipe()
+        process.standardOutput = Pipe()
+        process.standardError = errPipe
 
         do {
             try process.run()
-            codexProfileError = nil
+            codexProfileError = "Sign-in opened in your browser. Approve to finish."
         } catch {
-            codexProfileError = "Cannot open Codex login: \(error.localizedDescription)"
+            codexProfileError = "Cannot launch codex login: \(error.localizedDescription)"
+            return
+        }
+
+        // Wait off the main actor; refresh the popover once OAuth completes
+        // (or surface stderr if codex login fails).
+        Task.detached { [weak self] in
+            process.waitUntilExit()
+            let status = process.terminationStatus
+            let stderr = (try? errPipe.fileHandleForReading.readToEnd())
+                .flatMap { String(data: $0, encoding: .utf8) } ?? ""
+            await MainActor.run { [weak self] in
+                guard let self else { return }
+                if status == 0 {
+                    self.codexProfileError = nil
+                    Task { await self.refresh() }
+                } else {
+                    let trimmed = stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+                    self.codexProfileError = trimmed.isEmpty
+                        ? "codex login exited with status \(status)."
+                        : "codex login failed: \(trimmed.split(separator: "\n").last.map(String.init) ?? trimmed)"
+                }
+            }
         }
     }
 
-    func loadCodexAccount() {
-        guard let homePath = selectedCodexProfileHomePath else {
+    /// Refresh `codexAccount`, `codexUsage`, `codexTokenHistory` for whichever
+    /// tab is currently selected. Active tab reads live `~/.codex/`;
+    /// non-active tabs surface their last stored snapshot (or empty state).
+    func refreshSelectedProfileView() {
+        if isSelectedProfileActive {
+            Task { await captureActiveCodexProfile() }
+        } else {
+            applySelectedProfileSnapshot()
+        }
+    }
+
+    /// Snapshot for the currently selected (non-active) profile, used by the
+    /// view to render "snapshot N minutes ago".
+    var selectedProfileSnapshot: CodexProfileSnapshot? {
+        guard let selected = selectedCodexProfile else { return nil }
+        return codexProfileStore.loadSnapshot(homePath: selected.homePath)
+    }
+
+    /// One unified entry point that re-reads the live `~/.codex/`, writes a
+    /// snapshot under the active profile's slot, and pushes the data into the
+    /// @Published vars iff the user is currently looking at that profile.
+    /// Called by the 60s timer, by `refresh()`, and after `codex login`
+    /// completes.
+    func captureActiveCodexProfile() async {
+        guard let activeID = activeCodexProfileID else { return }
+        let homePath = codexProfileStore.defaultHome.path
+        let account = Self.readCodexAccount(homePath: homePath)
+        let scan = await Task.detached(priority: .userInitiated) {
+            Self.scanCodexLogs(homePath: homePath)
+        }.value
+
+        let snapshot = makeSnapshot(account: account, usage: scan.latest, history: scan.history)
+        codexProfileStore.saveSnapshot(homePath: activeID, snapshot: snapshot)
+
+        // Only mutate the visible state if the user is currently on the
+        // active tab; otherwise the non-active tab's snapshot view stays put.
+        if selectedCodexProfileID == activeID {
+            codexAccount = account
+            codexUsage = scan.latest
+            codexTokenHistory = scan.history
+        }
+    }
+
+    private func applySelectedProfileSnapshot() {
+        guard let profile = selectedCodexProfile,
+              let snapshot = codexProfileStore.loadSnapshot(homePath: profile.homePath) else {
             codexAccount = nil
+            codexUsage = nil
+            codexTokenHistory = .empty
             return
         }
-        codexAccount = Self.readCodexAccount(homePath: homePath)
+        codexAccount = CodexAccount(
+            email: snapshot.email,
+            planType: snapshot.planType,
+            accountId: snapshot.accountId,
+            userId: nil,
+            defaultOrganization: snapshot.orgTitle.map {
+                CodexOrganization(id: $0, title: $0, role: nil, isDefault: true)
+            },
+            organizations: []
+        )
+        codexUsage = snapshot.primary != nil || snapshot.secondary != nil
+            ? CodexUsageSnapshot(
+                primary: snapshot.primary.map {
+                    CodexRateLimit(usedPercent: $0.usedPercent, windowMinutes: $0.windowMinutes, resetsAt: $0.resetsAt)
+                },
+                secondary: snapshot.secondary.map {
+                    CodexRateLimit(usedPercent: $0.usedPercent, windowMinutes: $0.windowMinutes, resetsAt: $0.resetsAt)
+                },
+                planType: snapshot.planType,
+                totalTokens: 0,
+                lastTokens: 0,
+                modelContextWindow: nil,
+                updatedAt: snapshot.capturedAt,
+                sourceName: nil
+            )
+            : nil
+        codexTokenHistory = CodexTokenHistory(days: snapshot.days, updatedAt: snapshot.capturedAt)
+    }
+
+    private func makeSnapshot(
+        account: CodexAccount?,
+        usage: CodexUsageSnapshot?,
+        history: CodexTokenHistory
+    ) -> CodexProfileSnapshot {
+        let primary = usage?.primary.map {
+            CodexProfileSnapshot.RateSnapshot(
+                usedPercent: $0.usedPercent, windowMinutes: $0.windowMinutes, resetsAt: $0.resetsAt
+            )
+        }
+        let secondary = usage?.secondary.map {
+            CodexProfileSnapshot.RateSnapshot(
+                usedPercent: $0.usedPercent, windowMinutes: $0.windowMinutes, resetsAt: $0.resetsAt
+            )
+        }
+        return CodexProfileSnapshot(
+            email: account?.email,
+            planType: usage?.planType ?? account?.planType,
+            accountId: account?.accountId,
+            orgTitle: account?.defaultOrganization?.title,
+            primary: primary,
+            secondary: secondary,
+            last30DaysTokens: Self.sumLast30Days(history),
+            monthTokens: Self.sumCurrentMonth(history),
+            days: history.days,
+            capturedAt: Date()
+        )
+    }
+
+    private nonisolated static func sumLast30Days(_ history: CodexTokenHistory) -> Int64 {
+        let fmt = DateFormatter()
+        fmt.dateFormat = "yyyy-MM-dd"
+        fmt.timeZone = .current
+        let cal = Calendar.current
+        guard let cutoff = cal.date(byAdding: .day, value: -30, to: Date()) else { return 0 }
+        let cutoffStr = fmt.string(from: cutoff)
+        return history.days
+            .filter { $0.date >= cutoffStr }
+            .reduce(Int64(0)) { $0 + $1.tokens }
+    }
+
+    private nonisolated static func sumCurrentMonth(_ history: CodexTokenHistory) -> Int64 {
+        let cal = Calendar.current
+        let month = cal.component(.month, from: Date())
+        let year = cal.component(.year, from: Date())
+        return history.days
+            .filter { day in
+                let p = day.date.split(separator: "-")
+                guard p.count >= 2, let y = Int(p[0]), let m = Int(p[1]) else { return false }
+                return y == year && m == month
+            }
+            .reduce(Int64(0)) { $0 + $1.tokens }
     }
 
     private nonisolated static func readCodexAccount(homePath: String) -> CodexAccount? {
@@ -431,19 +644,6 @@ class UsageService: ObservableObject {
     }
 
     // MARK: - Codex Usage Scanner
-
-    func scanCodexUsageFromLogs() async {
-        guard let homePath = selectedCodexProfileHomePath else {
-            codexUsage = nil
-            codexTokenHistory = .empty
-            return
-        }
-        let result = await Task.detached(priority: .userInitiated) {
-            Self.scanCodexLogs(homePath: homePath)
-        }.value
-        codexUsage = result.latest
-        codexTokenHistory = result.history
-    }
 
     /// Scans local Codex session JSONL logs for the newest rate-limit event
     /// and daily token burn based on last_token_usage.
