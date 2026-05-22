@@ -227,46 +227,7 @@ struct UsagePopoverView: View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 5) {
                 ForEach(service.codexProfiles) { profile in
-                    let isSelected = profile.id == service.selectedCodexProfileID
-                    let isActive = profile.id == service.activeCodexProfileID
-
-                    Button(action: { service.selectCodexProfile(profile) }) {
-                        HStack(spacing: 5) {
-                            if isActive {
-                                Circle()
-                                    .fill(Term.green)
-                                    .frame(width: 5, height: 5)
-                            }
-                            Text(profile.displayName)
-                                .font(.system(size: 10, weight: isSelected ? .semibold : .regular, design: .monospaced))
-                                .lineLimit(1)
-                        }
-                        .foregroundStyle(isSelected ? Term.green : Term.text)
-                        .padding(.horizontal, 8)
-                        .frame(height: 24)
-                        .background(isSelected ? Term.green.opacity(0.12) : Term.track, in: RoundedRectangle(cornerRadius: 4))
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 4)
-                                .stroke(isSelected ? Term.green.opacity(0.75) : Term.border, lineWidth: 1)
-                        )
-                    }
-                    .buttonStyle(.plain)
-                    .opacity(draggingCodexProfileID == profile.id ? 0.45 : 1)
-                    .onDrag {
-                        draggingCodexProfileID = profile.id
-                        return NSItemProvider(object: profile.id as NSString)
-                    }
-                    .onDrop(of: [.text], isTargeted: nil) { _ in
-                        guard let draggingCodexProfileID,
-                              let moving = service.codexProfiles.first(where: { $0.id == draggingCodexProfileID }) else {
-                            return false
-                        }
-                        withAnimation(.easeInOut(duration: 0.14)) {
-                            service.moveCodexProfile(moving, to: profile)
-                        }
-                        self.draggingCodexProfileID = nil
-                        return true
-                    }
+                    codexProfileTab(profile)
                 }
 
                 Button(action: { service.createCodexProfile() }) {
@@ -281,6 +242,51 @@ struct UsagePopoverView: View {
                 .help("Add Codex profile")
             }
         }
+    }
+
+    private func codexProfileTab(_ profile: CodexProfile) -> some View {
+        let isSelected = profile.id == service.selectedCodexProfileID
+        let isActive = profile.id == service.activeCodexProfileID
+
+        return HStack(spacing: 5) {
+            if isActive {
+                Circle()
+                    .fill(Term.green)
+                    .frame(width: 5, height: 5)
+            }
+            Text(profile.displayName)
+                .font(.system(size: 10, weight: isSelected ? .semibold : .regular, design: .monospaced))
+                .lineLimit(1)
+        }
+        .foregroundStyle(isSelected ? Term.green : Term.text)
+        .padding(.horizontal, 8)
+        .frame(height: 24)
+        .background(isSelected ? Term.green.opacity(0.12) : Term.track, in: RoundedRectangle(cornerRadius: 4))
+        .overlay(
+            RoundedRectangle(cornerRadius: 4)
+                .stroke(isSelected ? Term.green.opacity(0.75) : Term.border, lineWidth: 1)
+        )
+        .contentShape(RoundedRectangle(cornerRadius: 4))
+        .opacity(draggingCodexProfileID == profile.id ? 0.45 : 1)
+        .onTapGesture {
+            service.selectCodexProfile(profile)
+        }
+        .onDrag {
+            draggingCodexProfileID = profile.id
+            return NSItemProvider(object: profile.id as NSString)
+        }
+        .onDrop(of: [.text], isTargeted: nil) { _ in
+            guard let draggingCodexProfileID,
+                  let moving = service.codexProfiles.first(where: { $0.id == draggingCodexProfileID }) else {
+                return false
+            }
+            withAnimation(.easeInOut(duration: 0.14)) {
+                service.moveCodexProfile(moving, to: profile)
+            }
+            self.draggingCodexProfileID = nil
+            return true
+        }
+        .help("Click to view. Drag onto another profile to reorder.")
     }
 
     private var codexAccountCard: some View {

@@ -13,7 +13,7 @@ A tiny macOS menu bar app that shows your Claude Code usage at a glance. Termina
 - **Account info** — plan, org, tier, subscription status via Anthropic OAuth API
 - **Current Session** — 5-hour window usage % with live countdown to reset
 - **Current Week** — 7-day window usage % with reset date
-- **Codex profiles** — view multiple Codex homes, rename profiles, and switch the terminal-side active account
+- **Codex profiles** — view multiple Codex homes, drag to reorder, rename profiles, and switch the terminal-side active account
 - **Codex reconnect** — relink an expired Codex profile with `CODEX_HOME=<profile> codex login`
 - **Status Line toggle** — enable/disable CC's terminal status line from the app
 - **Auto-sync** — watches for usage file updates from active CC sessions
