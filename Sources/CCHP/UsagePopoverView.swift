@@ -50,6 +50,8 @@ struct UsagePopoverView: View {
     @ObservedObject var codexTokenPanel: CodexTokenPanelController
     @State private var accountVis: AccountVisibility = .full
     @State private var provider: UsageProvider = .claude
+    @State private var renamingCodexProfileID: String?
+    @State private var codexProfileNameDraft = ""
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -157,6 +159,9 @@ struct UsagePopoverView: View {
 
     private var codexContent: some View {
         VStack(alignment: .leading, spacing: 8) {
+            if !service.codexProfiles.isEmpty {
+                codexProfileTabs
+            }
             codexAccountCard
             codexQuotaCard
             codexCostCard
@@ -169,7 +174,7 @@ struct UsagePopoverView: View {
     private let mask = "****"
 
     private func accountCard(_ profile: ProfileResponse) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
+        return VStack(alignment: .leading, spacing: 6) {
             // Eye toggle row
             HStack {
                 if accountVis == .full {
@@ -217,8 +222,89 @@ struct UsagePopoverView: View {
 
     // MARK: - Codex
 
+    private var codexProfileTabs: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 5) {
+                ForEach(service.codexProfiles) { profile in
+                    let isSelected = profile.id == service.selectedCodexProfileID
+                    let isActive = profile.id == service.activeCodexProfileID
+
+                    Button(action: { service.selectCodexProfile(profile) }) {
+                        HStack(spacing: 5) {
+                            if isActive {
+                                Circle()
+                                    .fill(Term.green)
+                                    .frame(width: 5, height: 5)
+                            }
+                            Text(profile.displayName)
+                                .font(.system(size: 10, weight: isSelected ? .semibold : .regular, design: .monospaced))
+                                .lineLimit(1)
+                        }
+                        .foregroundStyle(isSelected ? Term.green : Term.text)
+                        .padding(.horizontal, 8)
+                        .frame(height: 24)
+                        .background(isSelected ? Term.green.opacity(0.12) : Term.track, in: RoundedRectangle(cornerRadius: 4))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 4)
+                                .stroke(isSelected ? Term.green.opacity(0.75) : Term.border, lineWidth: 1)
+                        )
+                    }
+                    .buttonStyle(.plain)
+                }
+
+                Button(action: { service.createCodexProfile() }) {
+                    Image(systemName: "plus")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(Term.green)
+                        .frame(width: 24, height: 24)
+                        .background(Color.clear, in: RoundedRectangle(cornerRadius: 4))
+                        .overlay(RoundedRectangle(cornerRadius: 4).stroke(Term.green.opacity(0.65), lineWidth: 1))
+                }
+                .buttonStyle(.plain)
+                .help("Add Codex profile")
+            }
+        }
+    }
+
     private var codexAccountCard: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        let profile = service.selectedCodexProfile
+        let isActive = profile?.id == service.activeCodexProfileID
+
+        return VStack(alignment: .leading, spacing: 6) {
+            if let profile {
+                HStack(spacing: 6) {
+                    if renamingCodexProfileID == profile.id {
+                        TextField("", text: $codexProfileNameDraft)
+                            .font(.system(size: 11, weight: .medium, design: .monospaced))
+                            .foregroundStyle(Term.text)
+                            .textFieldStyle(.plain)
+                            .onSubmit { finishRenamingCodexProfile(profile) }
+                        Button(action: { finishRenamingCodexProfile(profile) }) {
+                            Image(systemName: "checkmark")
+                                .font(.system(size: 9))
+                                .foregroundStyle(Term.green)
+                        }
+                        .buttonStyle(.plain)
+                    } else {
+                        Text(profile.displayName)
+                            .font(.system(size: 11, weight: .medium, design: .monospaced))
+                            .foregroundStyle(Term.text)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                        Button(action: { startRenamingCodexProfile(profile) }) {
+                            Image(systemName: "pencil")
+                                .font(.system(size: 8))
+                                .foregroundStyle(Term.faint)
+                        }
+                        .buttonStyle(.plain)
+                    }
+
+                    Spacer()
+
+                    codexProfileAction(isActive: isActive)
+                }
+            }
+
             HStack(alignment: .firstTextBaseline) {
                 if accountVis == .full {
                     row("account", service.codexAccount?.email ?? "-")
@@ -245,8 +331,66 @@ struct UsagePopoverView: View {
                     row("plan", codexPlanDisplay)
                 }
             }
+
+            if let error = service.codexProfileError {
+                Text(error)
+                    .font(.system(size: 9, design: .monospaced))
+                    .foregroundStyle(Term.red)
+                    .lineLimit(2)
+            }
+
+            if profile != nil {
+                HStack {
+                    Spacer()
+                    Button(action: { service.reconnectSelectedCodexProfile() }) {
+                        Image(systemName: "arrow.triangle.2.circlepath")
+                            .font(.system(size: 9, weight: .semibold))
+                            .foregroundStyle(Term.dim)
+                            .frame(width: 20, height: 18)
+                            .background(Term.track, in: RoundedRectangle(cornerRadius: 3))
+                            .overlay(RoundedRectangle(cornerRadius: 3).stroke(Term.border, lineWidth: 1))
+                    }
+                    .buttonStyle(.plain)
+                    .help("Reconnect this Codex profile")
+                }
+            }
         }
         .termCard()
+    }
+
+    @ViewBuilder
+    private func codexProfileAction(isActive: Bool) -> some View {
+        if isActive {
+            Text("Using")
+                .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                .foregroundStyle(Term.faint)
+                .padding(.horizontal, 8)
+                .frame(height: 20)
+                .background(Term.track, in: RoundedRectangle(cornerRadius: 3))
+                .overlay(RoundedRectangle(cornerRadius: 3).stroke(Term.border, lineWidth: 1))
+        } else {
+            Button(action: { service.activateSelectedCodexProfile() }) {
+                Text("Use This")
+                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(Term.green)
+                    .padding(.horizontal, 8)
+                    .frame(height: 20)
+                    .background(Color.clear, in: RoundedRectangle(cornerRadius: 3))
+                    .overlay(RoundedRectangle(cornerRadius: 3).stroke(Term.green.opacity(0.75), lineWidth: 1))
+            }
+            .buttonStyle(.plain)
+        }
+    }
+
+    private func startRenamingCodexProfile(_ profile: CodexProfile) {
+        renamingCodexProfileID = profile.id
+        codexProfileNameDraft = profile.displayName
+    }
+
+    private func finishRenamingCodexProfile(_ profile: CodexProfile) {
+        service.renameCodexProfile(profile, displayName: codexProfileNameDraft)
+        renamingCodexProfileID = nil
+        codexProfileNameDraft = ""
     }
 
     private var codexQuotaCard: some View {
