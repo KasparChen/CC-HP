@@ -14,6 +14,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         codexTokenPanel = CodexTokenPanelController(service: usageService)
         NSApp.setActivationPolicy(.accessory)
 
+        // Keep snapshotting the active Codex profile in the background even
+        // when the popover is closed; otherwise quota chips on non-active
+        // tabs would only ever populate when the user manually opened them.
+        usageService.startCodexSnapshotTimer()
+
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         if let button = statusItem.button {
             button.image = NSImage(systemSymbolName: "chevron.left.forwardslash.chevron.right", accessibilityDescription: "CC-HP")
